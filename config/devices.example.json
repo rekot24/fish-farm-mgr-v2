@@ -1,0 +1,27 @@
+{
+  "EXAMPLE_ADB_SERIAL": {
+    "serial": "EXAMPLE_ADB_SERIAL",
+    "nickname": "Farm 1",
+    "model": "Pixel 6a",
+    "account": "MyRobloxAccount",
+    "auto_farm_enabled": true,
+    "end_run_enabled": true,
+    "stay_awake_enabled": false,
+    "stuck_lobby_detection_enabled": true,
+    "auto_farm_interval_s": 300.0,
+    "end_run_interval_s": 1800.0,
+    "stay_awake_interval_s": 30.0,
+    "detector_assignments": {
+      "in_tank": {
+        "image_filename": "in_tank_pixel6a.png",
+        "last_tested": "2026-09-10T12:00:00",
+        "last_score": 0.97
+      },
+      "auto_farm_off": {
+        "image_filename": null,
+        "last_tested": null,
+        "last_score": null
+      }
+    }
+  }
+}

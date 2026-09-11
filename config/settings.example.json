@@ -1,0 +1,23 @@
+{
+  "private_server_link": "",
+  "double_click_delay_s": 0.15,
+  "lobby_stuck_threshold_s": 60.0,
+  "disconnect_timeout_s": 60.0,
+  "loop_interval_s": 5.0,
+  "development_mode": false,
+  "logging": {
+    "enabled": true,
+    "level": "INFO",
+    "log_to_file": true,
+    "log_to_console": true,
+    "max_file_size_mb": 10,
+    "backup_count": 3
+  },
+  "debug": {
+    "enabled": false,
+    "log_state_changes": true,
+    "log_detections": false,
+    "log_actions": true,
+    "log_config_reads": false
+  }
+}

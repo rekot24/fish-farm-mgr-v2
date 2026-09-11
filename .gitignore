@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Logs
+logs/
+
+# Config (real device data — never commit)
+config/devices.json
+config/settings.json
+
+# Config examples are committed — real files are not
+!config/devices.example.json
+!config/settings.example.json
+
+# Assets — detector images are local only
+assets/detectors/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
