@@ -8,20 +8,20 @@ Startup sequence:
   1. Load settings and device configs
   2. Configure the logger
   3. Create the DeviceManager
-  4. Launch the UI (hands off control to the event loop)
+  4. Launch the UI (hands off control to Tkinter event loop)
 """
 
 from __future__ import annotations
 
-from config.devices import load_devices, DeviceConfig
+from config.devices import load_devices, save_devices
 from config.paths import project_root
-from config.settings import load_settings
+from config.settings import load_settings, save_settings
 from bot import app_logger
 from bot.device_manager import DeviceManager
 
 
 def main() -> None:
-    """Wire everything together and start the UI."""
+    """Wire everything together and launch the UI."""
 
     # 1. Load settings and device configs
     settings = load_settings()
@@ -29,7 +29,7 @@ def main() -> None:
 
     # Mutable containers so workers always read the latest values
     _settings_box: list = [settings]
-    _devices_box: list = [devices]
+    _devices_box:  list = [devices]
 
     def get_settings():
         return _settings_box[0]
@@ -46,6 +46,14 @@ def main() -> None:
         _devices_box[0] = load_devices()
         app_logger.log("Device configs reloaded", "INFO")
 
+    def save_settings_fn(s):
+        _settings_box[0] = s
+        save_settings(s)
+
+    def save_devices_fn(d):
+        _devices_box[0] = d
+        save_devices(d)
+
     # 2. Configure logger
     app_logger.configure(settings.logging, project_root())
     app_logger.log("Fish Farm Manager v2 starting", "INFO")
@@ -57,10 +65,18 @@ def main() -> None:
     )
 
     # 4. Launch UI
-    # TODO: Phase 3 — import and launch ui.app.App here
-    app_logger.log("UI not yet implemented (Phase 3). Core wiring complete.", "INFO")
-    serials = manager.discover_devices()
-    app_logger.log(f"Connected devices: {serials}", "INFO")
+    from ui.app import App
+    app = App(
+        manager=manager,
+        get_settings=get_settings,
+        get_devices=get_devices,
+        reload_settings=reload_settings,
+        reload_devices=reload_devices,
+        save_settings_fn=save_settings_fn,
+        save_devices_fn=save_devices_fn,
+    )
+    app.protocol("WM_DELETE_WINDOW", app.on_close)
+    app.mainloop()
 
 
 if __name__ == "__main__":
