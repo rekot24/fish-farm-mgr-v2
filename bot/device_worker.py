@@ -15,6 +15,7 @@ Key changes from previous version:
 
 from __future__ import annotations
 
+import subprocess
 import threading
 import time
 from typing import Callable, Optional
@@ -38,7 +39,7 @@ from detection.template_bank import TemplateBank
 
 _DETECTOR_PRIORITY = [
     states.DISCONNECTED,
-    states.CRASHED,
+    # CRASHED is detected via ADB process check, not screenshot — see _resolve_state()
     states.ROBLOX_HOME,
     states.LOBBY,
     states.AUTO_FARM_OFF,
@@ -206,6 +207,14 @@ class DeviceWorker:
                         f"(score={result.score:.3f})", "INFO")
                     self._current_state = detector_name
                 return detector_name
+
+        # Nothing matched — check if Roblox is even running before declaring UNKNOWN.
+        # Only runs when no other detector fired, avoiding unnecessary ADB calls.
+        if not self._is_roblox_running():
+            if self._current_state != states.CRASHED:
+                self._log("Roblox process not found — marking as CRASHED", "WARNING")
+                self._current_state = states.CRASHED
+            return states.CRASHED
 
         if self._current_state != states.UNKNOWN:
             self._log(f"State: {self._current_state} → {states.UNKNOWN}", "INFO")
@@ -489,6 +498,24 @@ class DeviceWorker:
     # ------------------------------------------------------------------
     # Utilities
     # ------------------------------------------------------------------
+
+    def _is_roblox_running(self) -> bool:
+        """
+        Check if Roblox is running on the device via ADB process check.
+        Returns True if the process exists, False if the app is closed/crashed.
+        This is more reliable than a screenshot match for detecting a crash.
+        """
+        try:
+            from config.paths import adb_exe
+            result = subprocess.run(
+                [adb_exe(), "-s", self._serial, "shell", "pidof", "com.roblox.client"],
+                capture_output=True, timeout=5.0,
+            )
+            # pidof returns the PID if running, empty string if not
+            return bool(result.stdout.strip())
+        except Exception as e:
+            self._log(f"pidof check failed: {e}", "WARNING")
+            return True  # assume running on error to avoid false crash recovery
 
     def _set_last_action(self, action: str) -> None:
         self._last_action = action
