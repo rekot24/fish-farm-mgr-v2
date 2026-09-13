@@ -46,6 +46,7 @@ DETECTOR_NAMES = [
     "net_reveal",
     "in_tank",
     "end_run_button",
+    "continue_dialog",
 ]
 
 _DOT_DEVICE = "#16a34a"
