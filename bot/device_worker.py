@@ -165,11 +165,18 @@ class DeviceWorker:
                 if frame is None:
                     self._log("Frame capture returned None — checking if Roblox is running", "WARNING")
                     # No frame usually means scrcpy has nothing to stream — check process
-                    if not self._is_roblox_running():
-                        if self._current_state != states.CRASHED:
-                            self._log("Roblox process not found — marking as CRASHED", "WARNING")
-                            self._current_state = states.CRASHED
-                        self._act(states.CRASHED, cfg, settings)
+                    if not self._is_roblox_foreground():
+                        if not self._is_roblox_running():
+                            # Process not running at all — crash recovery
+                            if self._current_state != states.CRASHED:
+                                self._log("Roblox not running — marking as CRASHED", "WARNING")
+                                self._current_state = states.CRASHED
+                            self._act(states.CRASHED, cfg, settings)
+                        else:
+                            # Process running but backgrounded — bring to foreground
+                            self._log("Roblox is backgrounded — bringing to foreground", "WARNING")
+                            launch_roblox(self._serial)
+                            self._current_state = states.UNKNOWN
                     time.sleep(settings.loop_interval_s)
                     continue
 
@@ -214,13 +221,20 @@ class DeviceWorker:
                     self._current_state = detector_name
                 return detector_name
 
-        # Nothing matched — check if Roblox is even running before declaring UNKNOWN.
+        # Nothing matched — check if Roblox is foreground before declaring UNKNOWN.
         # Only runs when no other detector fired, avoiding unnecessary ADB calls.
-        if not self._is_roblox_running():
-            if self._current_state != states.CRASHED:
-                self._log("Roblox process not found — marking as CRASHED", "WARNING")
-                self._current_state = states.CRASHED
-            return states.CRASHED
+        if not self._is_roblox_foreground():
+            if not self._is_roblox_running():
+                # Process gone entirely — crash
+                if self._current_state != states.CRASHED:
+                    self._log("Roblox not running — marking as CRASHED", "WARNING")
+                    self._current_state = states.CRASHED
+                return states.CRASHED
+            else:
+                # Process exists but backgrounded — bring to foreground
+                self._log("Roblox is backgrounded — bringing to foreground", "WARNING")
+                launch_roblox(self._serial)
+                return states.UNKNOWN
 
         if self._current_state != states.UNKNOWN:
             self._log(f"State: {self._current_state} → {states.UNKNOWN}", "INFO")
@@ -505,12 +519,41 @@ class DeviceWorker:
     # Utilities
     # ------------------------------------------------------------------
 
+    def _is_roblox_foreground(self) -> bool:
+        """
+        Check if Roblox is the active foreground app via ADB.
+        Uses dumpsys activity to find the resumed activity.
+        Returns True only if com.roblox.client is the foreground app.
+        Defaults to True on error to avoid false recovery loops.
+        """
+        try:
+            from config.paths import adb_exe
+            result = subprocess.run(
+                [adb_exe(), "-s", self._serial, "shell",
+                 "dumpsys", "activity", "activities"],
+                capture_output=True, timeout=8.0,
+            )
+            output = result.stdout.decode("utf-8", errors="replace")
+            # Look for the resumed activity line
+            for line in output.splitlines():
+                if "mResumedActivity" in line or "ResumedActivity" in line:
+                    is_foreground = "com.roblox.client" in line
+                    self._log(
+                        f"Roblox {'is' if is_foreground else 'is NOT'} foreground app",
+                        "DEBUG" if is_foreground else "WARNING",
+                    )
+                    return is_foreground
+            # No resumed activity line found — assume not foreground
+            self._log("Could not determine foreground app", "WARNING")
+            return False
+        except Exception as e:
+            self._log(f"Foreground check failed: {e}", "WARNING")
+            return True  # assume foreground on error to avoid false recovery
+
     def _is_roblox_running(self) -> bool:
         """
-        Check if Roblox is running via ADB.
-        Uses 'ps -A' and grep — universally supported on Android.
-        Returns True if the process is found, False if not running.
-        Defaults to True on error to avoid false crash recovery loops.
+        Check if Roblox process exists at all (running or backgrounded).
+        Uses ps -A — universally supported on Android.
         """
         try:
             from config.paths import adb_exe
@@ -520,15 +563,10 @@ class DeviceWorker:
                 capture_output=True, timeout=5.0,
             )
             output = result.stdout.decode("utf-8", errors="replace")
-            running = "com.roblox.client" in output
-            self._log(
-                f"Roblox process {'found' if running else 'NOT found'}",
-                "DEBUG" if running else "WARNING",
-            )
-            return running
+            return "com.roblox.client" in output
         except Exception as e:
             self._log(f"Process check failed: {e}", "WARNING")
-            return True  # assume running on error to avoid false crash recovery
+            return True
 
     def _set_last_action(self, action: str) -> None:
         self._last_action = action
