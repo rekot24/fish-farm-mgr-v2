@@ -507,20 +507,27 @@ class DeviceWorker:
 
     def _is_roblox_running(self) -> bool:
         """
-        Check if Roblox is running on the device via ADB process check.
-        Returns True if the process exists, False if the app is closed/crashed.
-        This is more reliable than a screenshot match for detecting a crash.
+        Check if Roblox is running via ADB.
+        Uses 'ps -A' and grep — universally supported on Android.
+        Returns True if the process is found, False if not running.
+        Defaults to True on error to avoid false crash recovery loops.
         """
         try:
             from config.paths import adb_exe
             result = subprocess.run(
-                [adb_exe(), "-s", self._serial, "shell", "pidof", "com.roblox.client"],
+                [adb_exe(), "-s", self._serial, "shell",
+                 "ps", "-A", "-o", "NAME"],
                 capture_output=True, timeout=5.0,
             )
-            # pidof returns the PID if running, empty string if not
-            return bool(result.stdout.strip())
+            output = result.stdout.decode("utf-8", errors="replace")
+            running = "com.roblox.client" in output
+            self._log(
+                f"Roblox process {'found' if running else 'NOT found'}",
+                "DEBUG" if running else "WARNING",
+            )
+            return running
         except Exception as e:
-            self._log(f"pidof check failed: {e}", "WARNING")
+            self._log(f"Process check failed: {e}", "WARNING")
             return True  # assume running on error to avoid false crash recovery
 
     def _set_last_action(self, action: str) -> None:
