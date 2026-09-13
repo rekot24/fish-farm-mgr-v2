@@ -163,7 +163,13 @@ class DeviceWorker:
 
                 frame = self._capture.get_frame()
                 if frame is None:
-                    self._log("Frame capture returned None — skipping cycle", "WARNING")
+                    self._log("Frame capture returned None — checking if Roblox is running", "WARNING")
+                    # No frame usually means scrcpy has nothing to stream — check process
+                    if not self._is_roblox_running():
+                        if self._current_state != states.CRASHED:
+                            self._log("Roblox process not found — marking as CRASHED", "WARNING")
+                            self._current_state = states.CRASHED
+                        self._act(states.CRASHED, cfg, settings)
                     time.sleep(settings.loop_interval_s)
                     continue
 
