@@ -3,24 +3,14 @@ bot/device_worker.py
 
 The main loop for a single device. One DeviceWorker per connected phone.
 
-Loop:
-  1. Capture a frame from the device
-  2. Run all detectors against the frame
-  3. Resolve the current state (simple priority-ordered if/elif)
-  4. Take the appropriate action for that state
-  5. Sleep for loop_interval_s
-  6. Repeat
-
-State resolution priority (highest to lowest):
-  DISCONNECTED > CRASHED > ROBLOX_HOME > LOBBY > AUTO_FARM_OFF >
-  DEATH_SCREEN > NET_REVEAL > IN_TANK > UNKNOWN
-
-Timers:
-  - auto_farm: fires a double-tap at the auto-farm button on interval
-  - end_run: fires a tap at the end-run button on interval
-  - stay_awake: fires a tap at (1,1) on interval
-  - lobby_timer: tracks time spent in LOBBY; triggers leave+rejoin if stuck
-  - disconnect_timer: tracks time on DISCONNECTED screen; triggers Leave if exceeded
+Key changes from previous version:
+  - AUTO_FARM_OFF is now also checked inside _handle_lobby() so auto farm
+    gets re-enabled even when the primary state is LOBBY.
+  - get_status() now includes time_in_lobby_s for the UI card.
+  - Lobby card shows a single "In lobby" timer; no redundant stuck countdown.
+  - Tap coordinates resolved via template bank (Phase 6 cache prep):
+    auto_farm and end_run no longer rely on manual x/y fields.
+    For now, tap_x/y are resolved from the detector result center.
 """
 
 from __future__ import annotations
@@ -46,12 +36,6 @@ from detection.detector import run_detector_by_name
 from detection.template_bank import TemplateBank
 
 
-# ---------------------------------------------------------------------------
-# Detector names — all states the worker checks each cycle
-# ---------------------------------------------------------------------------
-
-# Ordered from most-specific / highest-priority to least.
-# The first detector that fires wins the state resolution.
 _DETECTOR_PRIORITY = [
     states.DISCONNECTED,
     states.CRASHED,
@@ -63,14 +47,13 @@ _DETECTOR_PRIORITY = [
     states.IN_TANK,
 ]
 
+# Detectors checked inside lobby to catch auto-farm state
+_LOBBY_SECONDARY_CHECKS = [
+    states.AUTO_FARM_OFF,
+]
+
 
 class DeviceWorker:
-    """
-    Manages the capture-detect-act loop for one Android device.
-
-    Created and owned by DeviceManager. The UI interacts with this
-    worker only through DeviceManager.get_status() — never directly.
-    """
 
     def __init__(
         self,
@@ -87,29 +70,26 @@ class DeviceWorker:
         self._get_settings = get_settings
         self._get_device_cfg = get_device_cfg
 
-        # Threading
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
 
-        # State
         self._current_state: str = states.UNKNOWN
         self._last_action: str = "None"
         self._running: bool = False
         self._start_time: Optional[float] = None
 
-        # Timers — all tracked as "time of last fire" (monotonic seconds)
         self._last_auto_farm_tap: float = 0.0
         self._last_end_run_tap: float = 0.0
         self._last_stay_awake_tap: float = 0.0
 
-        # Lobby stuck timer — set when LOBBY is first detected
         self._lobby_entered_at: Optional[float] = None
-
-        # Disconnect timer — set when DISCONNECTED is first detected
         self._disconnect_detected_at: Optional[float] = None
 
+        # Last captured frame — kept so lobby secondary checks reuse same frame
+        self._last_frame = None
+
     # ------------------------------------------------------------------
-    # Public interface (called by DeviceManager only)
+    # Public interface
     # ------------------------------------------------------------------
 
     @property
@@ -122,15 +102,11 @@ class DeviceWorker:
 
     def start(self) -> None:
         if self._running:
-            self._log("start() called but worker is already running", "WARNING")
             return
         self._stop_event.clear()
         self._start_time = time.monotonic()
         self._thread = threading.Thread(
-            target=self._run,
-            daemon=True,
-            name=f"worker-{self._serial[:8]}",
-        )
+            target=self._run, daemon=True, name=f"worker-{self._serial[:8]}")
         self._thread.start()
         self._running = True
         self._log("Worker started", "INFO")
@@ -149,18 +125,20 @@ class DeviceWorker:
         cfg = self._get_device_cfg()
         now = time.monotonic()
         elapsed_auto = now - self._last_auto_farm_tap
-        elapsed_end = now - self._last_end_run_tap
+        elapsed_end  = now - self._last_end_run_tap
+        time_in_lobby = (now - self._lobby_entered_at) if self._lobby_entered_at else 0.0
         return {
-            "serial": self._serial,
-            "nickname": cfg.nickname,
-            "model": cfg.model,
-            "account": cfg.account,
-            "running": self._running,
-            "state": self._current_state,
-            "last_action": self._last_action,
-            "runtime_s": (now - self._start_time) if self._start_time else 0.0,
+            "serial":               self._serial,
+            "nickname":             cfg.nickname,
+            "model":                cfg.model,
+            "account":              cfg.account,
+            "running":              self._running,
+            "state":                self._current_state,
+            "last_action":          self._last_action,
+            "runtime_s":            (now - self._start_time) if self._start_time else 0.0,
             "auto_farm_countdown_s": max(0.0, cfg.auto_farm_interval_s - elapsed_auto),
-            "end_run_countdown_s": max(0.0, cfg.end_run_interval_s - elapsed_end),
+            "end_run_countdown_s":  max(0.0, cfg.end_run_interval_s - elapsed_end),
+            "time_in_lobby_s":      time_in_lobby,
         }
 
     def force_end_run(self) -> None:
@@ -185,14 +163,14 @@ class DeviceWorker:
                     time.sleep(settings.loop_interval_s)
                     continue
 
+                self._last_frame = frame
                 detected_state = self._resolve_state(frame, cfg, settings)
                 self._act(detected_state, cfg, settings)
                 time.sleep(settings.loop_interval_s)
 
             except Exception as e:
                 self._log(
-                    f"Unhandled error in worker loop: {type(e).__name__}: {e}", "ERROR"
-                )
+                    f"Unhandled error in worker loop: {type(e).__name__}: {e}", "ERROR")
                 if settings.development_mode:
                     raise
                 time.sleep(settings.loop_interval_s)
@@ -215,17 +193,14 @@ class DeviceWorker:
             )
             if result.found:
                 app_logger.debug(
-                    settings.debug,
-                    "detections",
+                    settings.debug, "detections",
                     f"{self._serial[:8]} detected {detector_name} (score={result.score:.3f})",
                     self._log,
                 )
                 if detector_name != self._current_state:
                     self._log(
                         f"State: {self._current_state} → {detector_name} "
-                        f"(score={result.score:.3f})",
-                        "INFO",
-                    )
+                        f"(score={result.score:.3f})", "INFO")
                     self._current_state = detector_name
                 return detector_name
 
@@ -233,6 +208,32 @@ class DeviceWorker:
             self._log(f"State: {self._current_state} → {states.UNKNOWN}", "INFO")
             self._current_state = states.UNKNOWN
         return states.UNKNOWN
+
+    def _check_secondary(self, detector_name: str, cfg: DeviceConfig,
+                          settings: Settings) -> bool:
+        """
+        Run a secondary detector check on the current frame without changing
+        the primary state. Used to detect AUTO_FARM_OFF while in LOBBY.
+        Returns True if the detector matched.
+        """
+        if self._last_frame is None:
+            return False
+        device_overrides = list(cfg.detector_assignments.keys())
+        result = run_detector_by_name(
+            detector_name=detector_name,
+            frame_bgr=self._last_frame,
+            device_serial=self._serial,
+            device_overrides=device_overrides,
+            bank=self._bank,
+            threshold=DETECTION_THRESHOLD,
+        )
+        if result.found:
+            app_logger.debug(
+                settings.debug, "detections",
+                f"{self._serial[:8]} secondary: {detector_name} (score={result.score:.3f})",
+                self._log,
+            )
+        return result.found
 
     # ------------------------------------------------------------------
     # Action dispatch
@@ -249,10 +250,7 @@ class DeviceWorker:
             self._handle_lobby(cfg, settings)
         elif state == states.AUTO_FARM_OFF:
             self._handle_auto_farm_off(cfg, settings)
-        elif state == states.DEATH_SCREEN:
-            self._reset_lobby_timer()
-            self._reset_disconnect_timer()
-        elif state == states.NET_REVEAL:
+        elif state in (states.DEATH_SCREEN, states.NET_REVEAL):
             self._reset_lobby_timer()
             self._reset_disconnect_timer()
         elif state == states.IN_TANK:
@@ -290,7 +288,7 @@ class DeviceWorker:
 
         if self._lobby_entered_at is None:
             self._lobby_entered_at = now
-            self._log("Entered lobby — starting stuck timer", "INFO")
+            self._log("Entered lobby — starting lobby timer", "INFO")
 
         if cfg.stay_awake_enabled:
             if now - self._last_stay_awake_tap >= cfg.stay_awake_interval_s:
@@ -298,28 +296,25 @@ class DeviceWorker:
                 self._last_stay_awake_tap = now
                 self._set_last_action("Stay-awake tap (lobby)")
 
+        # Secondary check: auto farm may be off while in lobby — re-enable it
+        if cfg.auto_farm_enabled:
+            if self._check_secondary(states.AUTO_FARM_OFF, cfg, settings):
+                self._log("Auto-farm is OFF in lobby — tapping to re-enable", "INFO")
+                self._do_auto_farm_tap(cfg, settings)
+
         if cfg.stuck_lobby_detection_enabled:
             time_in_lobby = now - self._lobby_entered_at
             if time_in_lobby >= settings.lobby_stuck_threshold_s:
                 self._log(
                     f"Stuck in lobby for {time_in_lobby:.0f}s — leaving and rejoining",
-                    "WARNING",
-                )
+                    "WARNING")
                 self._leave_and_rejoin(cfg, settings)
 
     def _handle_auto_farm_off(self, cfg: DeviceConfig, settings: Settings) -> None:
+        """Auto farm is off and we're not in the lobby — single tap to re-enable."""
         self._reset_disconnect_timer()
-        auto_farm_x = getattr(cfg, "auto_farm_tap_x", None)
-        auto_farm_y = getattr(cfg, "auto_farm_tap_y", None)
-        if auto_farm_x is None or auto_farm_y is None:
-            self._log(
-                "AUTO_FARM_OFF detected but auto_farm_tap_x/y not set in device config.",
-                "WARNING",
-            )
-            return
         self._log("Auto-farm is OFF — tapping to re-enable", "INFO")
-        tap(self._serial, auto_farm_x, auto_farm_y)
-        self._set_last_action("Re-enabled auto-farm")
+        self._do_auto_farm_tap(cfg, settings)
 
     def _handle_disconnected(self, cfg: DeviceConfig, settings: Settings) -> None:
         self._reset_lobby_timer()
@@ -328,28 +323,15 @@ class DeviceWorker:
         if self._disconnect_detected_at is None:
             self._disconnect_detected_at = now
             self._log("Disconnected dialog detected — tapping Reconnect", "INFO")
-            reconnect_x = getattr(cfg, "reconnect_tap_x", None)
-            reconnect_y = getattr(cfg, "reconnect_tap_y", None)
-            if reconnect_x is None or reconnect_y is None:
-                self._log("reconnect_tap_x/y not set in device config.", "WARNING")
-                return
-            tap(self._serial, reconnect_x, reconnect_y)
-            self._set_last_action("Tapped Reconnect")
+            self._do_reconnect_tap(cfg)
             return
 
         time_disconnected = now - self._disconnect_detected_at
         if time_disconnected >= settings.disconnect_timeout_s:
             self._log(
                 f"Reconnect failed after {time_disconnected:.0f}s — tapping Leave",
-                "WARNING",
-            )
-            leave_x = getattr(cfg, "leave_tap_x", None)
-            leave_y = getattr(cfg, "leave_tap_y", None)
-            if leave_x is None or leave_y is None:
-                self._log("leave_tap_x/y not set in device config.", "WARNING")
-                return
-            tap(self._serial, leave_x, leave_y)
-            self._set_last_action("Tapped Leave (reconnect timeout)")
+                "WARNING")
+            self._do_leave_tap(cfg)
             self._reset_disconnect_timer()
 
     def _handle_crashed(self, cfg: DeviceConfig, settings: Settings) -> None:
@@ -371,51 +353,99 @@ class DeviceWorker:
         self._set_last_action("Joined private server from home screen")
 
     # ------------------------------------------------------------------
-    # Shared action helpers
+    # Action helpers
     # ------------------------------------------------------------------
 
     def _do_auto_farm_double_click(self, cfg: DeviceConfig, settings: Settings) -> None:
-        auto_farm_x = getattr(cfg, "auto_farm_tap_x", None)
-        auto_farm_y = getattr(cfg, "auto_farm_tap_y", None)
-        if auto_farm_x is None or auto_farm_y is None:
-            self._log(
-                "Auto-farm interval elapsed but auto_farm_tap_x/y not set.", "WARNING"
-            )
+        coords = self._resolve_tap_coords(cfg, [states.AUTO_FARM_ON, states.AUTO_FARM_OFF])
+        if coords is None:
+            self._log("Auto-farm: no image assigned for auto_farm_on or auto_farm_off", "WARNING")
             return
         self._log("Auto-farm interval elapsed — double-clicking", "INFO")
-        double_tap(
-            self._serial, auto_farm_x, auto_farm_y,
-            delay_s=settings.double_click_delay_s,
-        )
+        double_tap(self._serial, coords[0], coords[1], delay_s=settings.double_click_delay_s)
         self._last_auto_farm_tap = time.monotonic()
         self._set_last_action("Auto-farm double-click")
 
+    def _do_auto_farm_tap(self, cfg: DeviceConfig, settings: Settings) -> None:
+        """Single tap to re-enable auto farm when it's detected as OFF."""
+        coords = self._resolve_tap_coords(cfg, [states.AUTO_FARM_OFF])
+        if coords is None:
+            self._log("Auto-farm OFF: no image assigned for auto_farm_off", "WARNING")
+            return
+        tap(self._serial, coords[0], coords[1])
+        self._set_last_action("Re-enabled auto-farm (single tap)")
+
     def _do_end_run(self, cfg: DeviceConfig, settings: Settings) -> None:
-        end_run_x = getattr(cfg, "end_run_tap_x", None)
-        end_run_y = getattr(cfg, "end_run_tap_y", None)
-        if end_run_x is None or end_run_y is None:
-            self._log(
-                "End-run interval elapsed but end_run_tap_x/y not set.", "WARNING"
-            )
+        coords = self._resolve_tap_coords(cfg, [states.END_RUN_BUTTON])
+        if coords is None:
+            self._log("End-run: no image assigned for end_run_button", "WARNING")
             return
         self._log("End-run tap firing", "INFO")
-        tap(self._serial, end_run_x, end_run_y)
+        tap(self._serial, coords[0], coords[1])
         self._last_end_run_tap = time.monotonic()
         self._set_last_action("End-run tap")
 
-    def _leave_and_rejoin(self, cfg: DeviceConfig, settings: Settings) -> None:
-        leave_x = getattr(cfg, "leave_tap_x", None)
-        leave_y = getattr(cfg, "leave_tap_y", None)
-        if leave_x is None or leave_y is None:
-            self._log(
-                "Stuck-in-lobby recovery: leave_tap_x/y not set.", "WARNING"
-            )
+    def _do_reconnect_tap(self, cfg: DeviceConfig) -> None:
+        coords = self._resolve_tap_coords(cfg, [states.DISCONNECTED])
+        if coords is None:
+            self._log("Reconnect: no image assigned for disconnected", "WARNING")
             return
-        tap(self._serial, leave_x, leave_y)
+        tap(self._serial, coords[0], coords[1])
+        self._set_last_action("Tapped Reconnect")
+
+    def _do_leave_tap(self, cfg: DeviceConfig) -> None:
+        # Leave button is a separate region on the disconnected screen
+        # For now reuse disconnected detector center — Phase 6 will add
+        # a dedicated leave_button detector if needed
+        coords = self._resolve_tap_coords(cfg, [states.DISCONNECTED])
+        if coords is None:
+            self._log("Leave: no image assigned for disconnected", "WARNING")
+            return
+        tap(self._serial, coords[0], coords[1])
+        self._set_last_action("Tapped Leave")
+
+    def _resolve_tap_coords(
+        self,
+        cfg: DeviceConfig,
+        detector_names: list[str],
+    ) -> Optional[tuple[int, int]]:
+        """
+        Find tap coordinates by running template match for the first assigned
+        detector in detector_names that has a match on the current frame.
+        Returns (x, y) center of the match, or None if nothing matched.
+        Phase 6 will add caching on top of this.
+        """
+        if self._last_frame is None:
+            return None
+        device_overrides = list(cfg.detector_assignments.keys())
+        for name in detector_names:
+            if name not in device_overrides:
+                continue
+            result = run_detector_by_name(
+                detector_name=name,
+                frame_bgr=self._last_frame,
+                device_serial=self._serial,
+                device_overrides=device_overrides,
+                bank=self._bank,
+                threshold=DETECTION_THRESHOLD,
+            )
+            if result.found and result.center:
+                assignment = cfg.detector_assignments.get(name)
+                if assignment and assignment.tap_offset_x is not None:
+                    # Apply tap offset from crop tool
+                    bbox_x = result.bbox[0] if result.bbox else result.center[0]
+                    bbox_y = result.bbox[1] if result.bbox else result.center[1]
+                    return (bbox_x + assignment.tap_offset_x,
+                            bbox_y + assignment.tap_offset_y)
+                return result.center
+        return None
+
+    def _leave_and_rejoin(self, cfg: DeviceConfig, settings: Settings) -> None:
+        self._do_leave_tap(cfg)
         time.sleep(3.0)
         join_private_server(self._serial, settings.private_server_link)
         self._reset_lobby_timer()
-        self._set_last_action("Left + rejoined private server (stuck in lobby)")
+        self._set_last_action("Left + rejoined (stuck in lobby)")
 
     # ------------------------------------------------------------------
     # Timer helpers
@@ -430,17 +460,14 @@ class DeviceWorker:
             self._disconnect_detected_at = None
 
     # ------------------------------------------------------------------
-    # Internal utilities
+    # Utilities
     # ------------------------------------------------------------------
 
     def _set_last_action(self, action: str) -> None:
         self._last_action = action
         app_logger.debug(
-            self._get_settings().debug,
-            "actions",
-            f"{self._serial[:8]}: {action}",
-            self._log,
-        )
+            self._get_settings().debug, "actions",
+            f"{self._serial[:8]}: {action}", self._log)
 
     def _log(self, msg: str, level: str = "INFO") -> None:
         app_logger.log(f"[{self._serial[:8]}] {msg}", level)

@@ -345,12 +345,10 @@ class DeviceCard(ttk.Frame):
             _timer_col(self._timer_frame, "Auto-farm", _fmt_secs(af))
             _timer_col(self._timer_frame, "End run",   _fmt_secs(er), warn=er < 60)
         elif state == "LOBBY":
-            stuck_cd = status.get("lobby_stuck_countdown_s", 0.0)
-            time_in  = status.get("time_in_lobby_s", 0.0)
-            _timer_col(self._timer_frame, "Stuck timer", _fmt_secs(stuck_cd), warn=True)
-            _timer_col(self._timer_frame, "In lobby",    _fmt_secs(time_in),  warn=True)
+            time_in = status.get("time_in_lobby_s", 0.0)
+            _timer_col(self._timer_frame, "In lobby", _fmt_secs(time_in), warn=time_in > 30)
             self._alert_bar.config(
-                text=f"Leaving and rejoining in {_fmt_secs(stuck_cd)}",
+                text=f"In lobby for {_fmt_secs(time_in)}",
                 fg="#b45309", bg="#fef3c7")
             self._alert_bar.pack(fill="x", pady=(4, 0))
         elif state in ("CRASHED", "DISCONNECTED"):

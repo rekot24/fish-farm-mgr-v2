@@ -35,5 +35,8 @@ CRASHED = "CRASHED"
 # Roblox is open but showing the home/games screen.
 ROBLOX_HOME = "ROBLOX_HOME"
 
+# End-run button — used for coordinate resolution only.
+END_RUN_BUTTON = "end_run_button"
+
 # No detector matched on this cycle.
 UNKNOWN = "UNKNOWN"
