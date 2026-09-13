@@ -143,10 +143,11 @@ def _tap_continue_dialog(
                     tx = max_loc[0] + tw // 2
                     ty = max_loc[1] + th // 2
                 app_logger.log(
-                    f"[actions] Continue dialog found (score={max_val:.2f}) — tapping",
+                    f"[actions] Continue dialog found (score={max_val:.2f}) bbox={max_loc} tap=({tx},{ty})",
                     "INFO",
                 )
-                tap(serial, tx, ty)
+                tap_ok = tap(serial, tx, ty)
+                app_logger.log(f"[actions] Tap result={tap_ok} at ({tx},{ty})", "INFO")
                 return True
         except Exception as e:
             app_logger.log(f"[actions] Continue dialog poll error: {e}", "WARNING")
@@ -158,12 +159,9 @@ def _tap_continue_dialog(
 
 def join_private_server(serial: str, server_link: str) -> bool:
     """
-    Join a Roblox private server using the share link from the server panel.
-
-    Passes the https://www.roblox.com/share?code=...&type=Server URL
-    directly to Roblox using an explicit intent with the Roblox package
-    and its URL-handling activity. This bypasses the Android browser
-    entirely and hands the link straight to the app.
+    Join a Roblox private server by typing the URL into Chrome's address bar.
+    This mimics exactly what a user does manually — which is confirmed to work.
+    Opening Chrome via intent produces a different result than typing the URL.
     """
     if not server_link:
         app_logger.log(
@@ -171,36 +169,63 @@ def join_private_server(serial: str, server_link: str) -> bool:
             "Set the private server link in Settings.", "WARNING"
         )
         return False
-    app_logger.log(f"[actions] Joining via Chrome → Roblox: {server_link}", "INFO")
 
-    # 1. Force-stop both Chrome and Roblox for a clean start
+    app_logger.log(f"[actions] Joining via Chrome address bar: {server_link}", "INFO")
+
+    # 1. Force-stop Chrome and Roblox for a clean state
     _adb(serial, "shell", "am", "force-stop", "com.android.chrome")
     force_stop_roblox(serial)
-    time.sleep(1.0)
+    time.sleep(1.5)
 
-    # 2. Open Chrome with the share link — this loads the Roblox share page
-    #    which triggers the "Continue to Roblox?" system dialog
-    result = _adb(
+    # 2. Open Chrome to a blank page
+    _adb(
         serial,
         "shell", "am", "start",
         "-n", "com.android.chrome/com.google.android.apps.chrome.Main",
         "--activity-clear-task",
-        "-d", server_link,
+        "-d", "about:blank",
     )
+    time.sleep(3.0)
 
-    # 3. Wait for Chrome to load the page and show the Continue dialog
-    time.sleep(6.0)
+    # 3. Get screen dimensions to calculate address bar position
+    screen_w, screen_h = 1080, 2400
+    try:
+        import subprocess as _sp
+        sr = _sp.run(
+            [adb_exe(), "-s", serial, "shell", "wm", "size"],
+            capture_output=True, text=True, timeout=5.0
+        )
+        parts = sr.stdout.strip().split(":")[-1].strip().split("x")
+        screen_w, screen_h = int(parts[0]), int(parts[1])
+    except Exception:
+        pass
+    app_logger.log(f"[actions] Screen size: {screen_w}x{screen_h}", "INFO")
 
-    # 4. Tap the Continue button — it appears as a system dialog.
-    #    KEYCODE_ENTER confirms the focused button in Android dialogs.
-    #    We also try tapping the typical button position as a fallback.
-    _adb(serial, "shell", "input", "keyevent", "KEYCODE_ENTER")
+    # 4. Tap the Chrome address bar (omnibox) — top ~5.5% of screen
+    bar_x = screen_w // 2
+    bar_y = int(screen_h * 0.055)
+    app_logger.log(f"[actions] Tapping address bar at ({bar_x}, {bar_y})", "INFO")
+    tap(serial, bar_x, bar_y)
+    time.sleep(1.0)
+
+    # 5. Select all existing text and clear it
+    _adb(serial, "shell", "input", "keyevent", "KEYCODE_CTRL_A")
+    time.sleep(0.2)
+    _adb(serial, "shell", "input", "keyevent", "KEYCODE_DEL")
+    time.sleep(0.2)
+
+    # 6. Type the URL into the address bar.
+    #    ADB subprocess.run with a list doesn't use a shell so & is safe.
+    #    _adb() uses subprocess.run with a list — no shell interpretation.
+    _adb(serial, "shell", "input", "text", server_link)
     time.sleep(0.5)
-    # Fallback tap — Continue button is typically in the lower-center of the dialog
-    _adb(serial, "shell", "input", "keyevent", "KEYCODE_DPAD_RIGHT")
-    _adb(serial, "shell", "input", "keyevent", "KEYCODE_ENTER")
 
-    app_logger.log("[actions] Tapped Continue on Roblox dialog", "INFO")
+    # 7. Press Enter to navigate
+    _adb(serial, "shell", "input", "keyevent", "KEYCODE_ENTER")
+    app_logger.log("[actions] URL entered — waiting for Continue to Roblox dialog", "INFO")
+
+    # 8. Poll for the Continue dialog and tap it
+    result = _tap_continue_dialog(serial, timeout_s=15.0)
     return result
 
 
