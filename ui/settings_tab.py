@@ -47,6 +47,8 @@ class SettingsTab(ttk.Frame):
         inner = ttk.Frame(canvas, padding=(16, 12))
         canvas.create_window((0, 0), window=inner, anchor="nw")
         inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        from ui.scroll_utils import bind_mousewheel
+        bind_mousewheel(canvas)
 
         f = inner
 

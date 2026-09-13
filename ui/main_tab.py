@@ -85,7 +85,8 @@ class MainTab(ttk.Frame):
         self._canvas_window = canvas.create_window((0, 0), window=self._card_frame, anchor="nw")
         self._card_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda e: canvas.itemconfig(self._canvas_window, width=e.width))
-        canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+        from ui.scroll_utils import bind_mousewheel
+        bind_mousewheel(canvas)
         self._canvas = canvas
 
         # ---- Debug panel ----

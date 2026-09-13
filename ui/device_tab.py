@@ -60,6 +60,8 @@ class DeviceTab(ttk.Frame):
         self._canvas_win = canvas.create_window((0, 0), window=self._detail_frame, anchor="nw")
         self._detail_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda e: canvas.itemconfig(self._canvas_win, width=e.width))
+        from ui.scroll_utils import bind_mousewheel
+        bind_mousewheel(canvas)
 
         ttk.Label(self._detail_frame, text="Select a device above.", foreground="#6b7280").pack(pady=20)
         self._refresh_list()
