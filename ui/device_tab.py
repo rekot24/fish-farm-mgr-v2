@@ -2,16 +2,6 @@
 ui/device_tab.py
 
 Device tab — device selector, identity/timer editing, add/remove devices.
-
-Add device flow:
-  1. Run 'adb devices' to find connected serials
-  2. Filter out already-registered devices
-  3. Show a dialog listing available serials to pick from
-  4. Add selected serial to devices.json with defaults
-
-Remove device:
-  Confirmation dialog, then removes from devices.json.
-  Does not stop a running worker — caller should stop first.
 """
 
 from __future__ import annotations
@@ -22,7 +12,7 @@ from tkinter import ttk, messagebox
 from dataclasses import replace
 from typing import Callable
 
-from config.devices import DeviceConfig, save_devices
+from config.devices import DeviceConfig
 from config.paths import adb_exe
 
 
@@ -80,16 +70,15 @@ class DeviceTab(ttk.Frame):
         from ui.scroll_utils import bind_mousewheel
         bind_mousewheel(canvas)
 
-        self._empty_label = ttk.Label(
+        ttk.Label(
             self._detail_frame,
             text="No devices registered. Click 'Add device' to get started.",
             foreground="#6b7280"
-        )
-        self._empty_label.pack(pady=20)
+        ).pack(pady=20)
         self._refresh_list()
 
     # ------------------------------------------------------------------
-    # Device list management
+    # Device list
     # ------------------------------------------------------------------
 
     def _refresh_list(self) -> None:
@@ -101,7 +90,6 @@ class DeviceTab(ttk.Frame):
         self._serial_list = list(devices.keys())
         self._device_combo["values"] = options
         if options:
-            # Keep current selection if still valid, else select first
             cur = self._device_combo.current()
             if cur < 0 or cur >= len(options):
                 self._device_combo.current(0)
@@ -109,9 +97,7 @@ class DeviceTab(ttk.Frame):
         else:
             self._device_combo.set("")
             self._show_empty()
-
-        self._remove_btn.config(
-            state="normal" if self._serial_list else "disabled")
+        self._remove_btn.config(state="normal" if self._serial_list else "disabled")
 
     def _load_selected(self) -> None:
         idx = self._device_combo.current()
@@ -132,23 +118,21 @@ class DeviceTab(ttk.Frame):
         ).pack(pady=20)
 
     # ------------------------------------------------------------------
-    # Add device
+    # Add / remove device
     # ------------------------------------------------------------------
 
     def _add_device(self) -> None:
-        """Discover connected ADB devices and offer unregistered ones to add."""
         try:
             result = subprocess.run(
                 [adb_exe(), "devices"], capture_output=True, timeout=10, text=True
             )
         except Exception as e:
             messagebox.showerror("ADB error",
-                f"Could not run 'adb devices':\n{e}", parent=self)
+                f"Could not run adb devices:\n{e}", parent=self)
             return
 
-        lines = result.stdout.strip().splitlines()
         connected = []
-        for line in lines[1:]:
+        for line in result.stdout.strip().splitlines()[1:]:
             parts = line.strip().split()
             if len(parts) >= 2 and parts[1] == "device":
                 connected.append(parts[0])
@@ -156,8 +140,8 @@ class DeviceTab(ttk.Frame):
         if not connected:
             messagebox.showinfo("No devices found",
                 "No ADB devices detected.\n\n"
-                "Make sure your device is connected via USB or ADB over network\n"
-                "and that USB debugging is enabled.", parent=self)
+                "Make sure your device is connected and USB debugging is enabled.",
+                parent=self)
             return
 
         registered = set(self._get_devices().keys())
@@ -165,19 +149,15 @@ class DeviceTab(ttk.Frame):
 
         if not available:
             messagebox.showinfo("All connected",
-                "All connected ADB devices are already registered.\n\n"
-                f"Connected: {', '.join(connected)}", parent=self)
+                f"All connected devices are already registered.\n\nConnected: {', '.join(connected)}",
+                parent=self)
             return
 
-        # Show picker dialog
         AddDeviceDialog(self, available=available, on_add=self._on_device_added)
 
     def _on_device_added(self, serial: str, nickname: str, model: str) -> None:
-        """Callback from AddDeviceDialog — register the new device."""
         devices = self._get_devices()
         if serial in devices:
-            messagebox.showwarning("Already registered",
-                f"{serial} is already registered.", parent=self)
             return
         devices[serial] = DeviceConfig(
             serial=serial,
@@ -186,15 +166,9 @@ class DeviceTab(ttk.Frame):
         )
         self._save_devices(devices)
         self._refresh_list()
-        # Select the newly added device
         if serial in self._serial_list:
-            idx = self._serial_list.index(serial)
-            self._device_combo.current(idx)
+            self._device_combo.current(self._serial_list.index(serial))
             self._load_selected()
-
-    # ------------------------------------------------------------------
-    # Remove device
-    # ------------------------------------------------------------------
 
     def _remove_device(self) -> None:
         idx = self._device_combo.current()
@@ -205,14 +179,13 @@ class DeviceTab(ttk.Frame):
         cfg = devices.get(serial)
         label = cfg.nickname or serial[:12] if cfg else serial[:12]
 
-        confirmed = messagebox.askyesno(
+        if not messagebox.askyesno(
             "Remove device",
             f"Remove '{label}' from the device list?\n\n"
             "This only removes the configuration — it does not affect\n"
             "the physical device or any saved detector images.",
             parent=self
-        )
-        if not confirmed:
+        ):
             return
 
         devices.pop(serial, None)
@@ -220,7 +193,7 @@ class DeviceTab(ttk.Frame):
         self._refresh_list()
 
     # ------------------------------------------------------------------
-    # Device detail view
+    # Detail view
     # ------------------------------------------------------------------
 
     def _show_detail(self, serial: str, cfg: DeviceConfig) -> None:
@@ -230,34 +203,43 @@ class DeviceTab(ttk.Frame):
         f = self._detail_frame
 
         def section(label):
-            ttk.Label(f, text=label, font=("", 10, "bold")).pack(
-                anchor="w", pady=(10, 4))
+            ttk.Label(f, text=label, font=("", 10, "bold")).pack(anchor="w", pady=(10, 4))
 
-        def field_row(label, value, readonly=False):
+        def editable_row(label, value):
+            """Editable field — normal Entry with StringVar."""
             row = ttk.Frame(f)
             row.pack(fill="x", pady=2)
             ttk.Label(row, text=label, width=22, anchor="w").pack(side="left")
-            var = tk.StringVar()
-            entry = ttk.Entry(row, textvariable=var, width=30)
-            entry.pack(side="left")
-            # Set value after widget creation so readonly entries display correctly
-            var.set(str(value) if value is not None else "")
-            if readonly:
-                entry.config(state="readonly")
+            var = tk.StringVar(value=str(value) if value else "")
+            ttk.Entry(row, textvariable=var, width=30).pack(side="left")
             return var
 
+        def readonly_row(label, value):
+            """
+            Read-only display field. Uses a disabled Entry with textvariable
+            set before the widget is rendered to ensure the value displays.
+            """
+            row = ttk.Frame(f)
+            row.pack(fill="x", pady=2)
+            ttk.Label(row, text=label, width=22, anchor="w").pack(side="left")
+            var = tk.StringVar(value=str(value) if value else "")
+            e = ttk.Entry(row, width=30)
+            e.pack(side="left")
+            # Insert directly into the widget — bypasses readonly restriction
+            e.insert(0, str(value) if value else "")
+            e.config(state="readonly")
+
         section("Identity")
-        nickname_var = field_row("Nickname", cfg.nickname)
-        model_var    = field_row("Model",    cfg.model)
-        account_var  = field_row("Account",  cfg.account)
-        field_row("ADB serial", cfg.serial, readonly=True)
+        nickname_var = editable_row("Nickname / Acct", cfg.nickname)
+        model_var    = editable_row("Model",           cfg.model)
+        readonly_row("ADB serial", serial)
 
         ttk.Separator(f, orient="horizontal").pack(fill="x", pady=8)
 
         section("Timer intervals (seconds)")
-        af_var = field_row("Auto-farm interval",  cfg.auto_farm_interval_s)
-        er_var = field_row("End-run interval",    cfg.end_run_interval_s)
-        sa_var = field_row("Stay-awake interval", cfg.stay_awake_interval_s)
+        af_var = editable_row("Auto-farm interval",  cfg.auto_farm_interval_s)
+        er_var = editable_row("End-run interval",    cfg.end_run_interval_s)
+        sa_var = editable_row("Stay-awake interval", cfg.stay_awake_interval_s)
 
         ttk.Separator(f, orient="horizontal").pack(fill="x", pady=8)
 
@@ -278,7 +260,8 @@ class DeviceTab(ttk.Frame):
                 cfg,
                 nickname=nickname_var.get().strip(),
                 model=model_var.get().strip(),
-                account=account_var.get().strip(),
+                # account is now merged into nickname — keep account in sync
+                account=nickname_var.get().strip(),
                 auto_farm_interval_s=_float(af_var, cfg.auto_farm_interval_s),
                 end_run_interval_s=_float(er_var, cfg.end_run_interval_s),
                 stay_awake_interval_s=_float(sa_var, cfg.stay_awake_interval_s),
@@ -296,20 +279,14 @@ class DeviceTab(ttk.Frame):
 # ---------------------------------------------------------------------------
 
 class AddDeviceDialog(tk.Toplevel):
-    """
-    Dialog showing unregistered connected ADB devices.
-    User picks one, optionally enters a nickname and model, then clicks Add.
-    """
 
     def __init__(self, parent, available: list[str], on_add):
         super().__init__(parent)
         self._available = available
         self._on_add = on_add
-
         self.title("Add device")
         self.resizable(False, False)
         self.grab_set()
-
         self._build()
         self.update_idletasks()
         px = parent.winfo_rootx() + parent.winfo_width() // 2 - self.winfo_width() // 2
@@ -322,18 +299,16 @@ class AddDeviceDialog(tk.Toplevel):
 
         ttk.Label(f, text="Connected ADB devices", font=("", 10, "bold")).grid(
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
-
         ttk.Label(f, text="Select device:").grid(
             row=1, column=0, sticky="w", padx=(0, 12), pady=4)
         self._serial_var = tk.StringVar(value=self._available[0])
-        ttk.Combobox(f, textvariable=self._serial_var,
-                     values=self._available, state="readonly",
-                     width=28).grid(row=1, column=1, sticky="ew", pady=4)
+        ttk.Combobox(f, textvariable=self._serial_var, values=self._available,
+                     state="readonly", width=28).grid(row=1, column=1, sticky="ew", pady=4)
 
         ttk.Separator(f, orient="horizontal").grid(
             row=2, column=0, columnspan=2, sticky="ew", pady=8)
 
-        ttk.Label(f, text="Nickname (optional):").grid(
+        ttk.Label(f, text="Nickname / Acct:").grid(
             row=3, column=0, sticky="w", padx=(0, 12), pady=4)
         self._nickname_var = tk.StringVar()
         ttk.Entry(f, textvariable=self._nickname_var, width=28).grid(
@@ -345,19 +320,15 @@ class AddDeviceDialog(tk.Toplevel):
         ttk.Entry(f, textvariable=self._model_var, width=28).grid(
             row=4, column=1, sticky="ew", pady=4)
 
-        ttk.Label(
-            f,
-            text="You can fill in these details later on the Device tab.",
-            foreground="#6b7280", font=("", 9)
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Label(f, text="You can fill in these details later on the Device tab.",
+                  foreground="#6b7280", font=("", 9)).grid(
+            row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         btn_frame = ttk.Frame(f)
         btn_frame.grid(row=6, column=0, columnspan=2, sticky="e", pady=(16, 0))
-        ttk.Button(btn_frame, text="Cancel",
-                   command=self.destroy).pack(side="right", padx=(6, 0))
-        ttk.Button(btn_frame, text="Add device",
-                   command=self._confirm).pack(side="right")
-
+        ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(
+            side="right", padx=(6, 0))
+        ttk.Button(btn_frame, text="Add device", command=self._confirm).pack(side="right")
         f.columnconfigure(1, weight=1)
 
     def _confirm(self) -> None:

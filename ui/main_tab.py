@@ -309,7 +309,7 @@ class DeviceCard(ttk.Frame):
     def update(self, status: dict) -> None:
         cfg = self._get_devices().get(self._serial)
         name  = cfg.nickname if cfg and cfg.nickname else self._serial[:8]
-        model = cfg.model    if cfg and cfg.model    else ""
+        model = cfg.model    if cfg and cfg.model    else self._serial
         self._name_label.config(text=name)
         self._model_label.config(text=model)
 
