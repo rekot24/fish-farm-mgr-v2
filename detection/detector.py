@@ -20,7 +20,7 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 
-from config.constants import DEFAULT_TEMPLATE_CONFIDENCE
+from config.constants import DETECTION_THRESHOLD
 from detection.result import DetectResult
 from detection.template_bank import TemplateBank
 
@@ -29,7 +29,7 @@ def find_in_frame(
     frame_bgr: np.ndarray,
     templates: List[np.ndarray],
     template_paths: List[str],
-    threshold: float = DEFAULT_TEMPLATE_CONFIDENCE,
+    threshold: float = DETECTION_THRESHOLD,
     detector_name: str = "",
 ) -> DetectResult:
     """
@@ -99,7 +99,7 @@ def run_detector_by_name(
     device_serial: str,
     device_overrides: List[str],
     bank: TemplateBank,
-    threshold: float = DEFAULT_TEMPLATE_CONFIDENCE,
+    threshold: float = DETECTION_THRESHOLD,
 ) -> DetectResult:
     """
     Run a named detector against a frame using the TemplateBank.
@@ -108,10 +108,10 @@ def run_detector_by_name(
     shared vs device-specific image resolution automatically.
 
     Args:
-        detector_name   : e.g. "auto_button_on"
+        detector_name   : e.g. "in_tank"
         frame_bgr       : current device screen
         device_serial   : ADB serial of the device
-        device_overrides: DeviceConfig.device_image_overrides
+        device_overrides: DeviceConfig.detector_assignments keys
         bank            : shared TemplateBank instance
         threshold       : match confidence threshold
 
@@ -128,11 +128,9 @@ def run_detector_by_name(
             threshold=threshold,
             detector_name=detector_name,
         )
-    except FileNotFoundError as e:
-        # Image not set up yet — not a fatal error, just not found
+    except FileNotFoundError:
         return DetectResult.not_found(detector_name)
-    except Exception as e:
-        # Unexpected error — log it but don't crash the worker
+    except Exception:
         return DetectResult.not_found(detector_name)
 
 
@@ -142,7 +140,7 @@ def run_all_detectors(
     device_serial: str,
     device_overrides: List[str],
     bank: TemplateBank,
-    threshold: float = DEFAULT_TEMPLATE_CONFIDENCE,
+    threshold: float = DETECTION_THRESHOLD,
 ) -> dict[str, DetectResult]:
     """
     Run all detectors in the list against a single frame.
@@ -167,20 +165,18 @@ def find_by_path(
     frame_bgr: np.ndarray,
     image_path: str,
     bank: TemplateBank,
-    threshold: float = DEFAULT_TEMPLATE_CONFIDENCE,
+    threshold: float = DETECTION_THRESHOLD,
     detector_name: str = "",
 ) -> DetectResult:
     """
     Run a detector using a direct image path (not a named detector).
-    Used for eaten_by_name_image matching — each support device's name
-    image is stored at a known path rather than as a named detector.
 
     Args:
         frame_bgr    : current device screen
         image_path   : path to the template image
         bank         : TemplateBank (handles caching)
         threshold    : match confidence threshold
-        detector_name: label for the result (e.g. "eaten_by:Pixel6Beta")
+        detector_name: label for the result
 
     Returns:
         DetectResult.
