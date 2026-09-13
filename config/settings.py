@@ -2,7 +2,6 @@
 config/settings.py
 
 Global settings schema, loader, and saver.
-Single source of truth for all app-wide configuration.
 """
 
 from __future__ import annotations
@@ -22,29 +21,39 @@ from config.constants import (
 
 @dataclass
 class LoggingConfig:
-    """Controls persistent log output to file."""
+    """
+    Controls Stream 1 — the persistent log record (INFO/WARNING/ERROR).
+    Completely independent of development mode.
+    """
     log_to_file: bool = True
-    level: str = "INFO"            # DEBUG / INFO / WARNING / ERROR / CRITICAL
+    level: str = "INFO"          # DEBUG / INFO / WARNING / ERROR / CRITICAL
     max_file_size_mb: int = 10
     backup_count: int = 3
-
-    # When log_to_file is False, only CRITICAL/ERROR still write to errors.log.
-    # The four sub-categories below are suppressed entirely when log_to_file is False.
 
 
 @dataclass
 class DebugConfig:
     """
-    Debug panel and debug-level output settings.
-    All categories are additive — turning one on never silences normal logging.
+    Controls the debug panel and its two independent streams.
+
+    Stream 1 — log data (INFO/WARNING/ERROR):
+        show_log_in_panel: routes log() output to the debug panel
+
+    Stream 2 — debug data (verbose, cycle-by-cycle):
+        show_debug_in_panel: routes debug() output to the debug panel
+        log_state_changes / log_detections / log_actions / log_config_reads:
+            per-category gates for debug stream only
+
+    development_mode: master switch — shows/hides the panel itself.
+        Auto-disabled when both show_log_in_panel and show_debug_in_panel are off.
     """
-    enabled: bool = False              # master switch — controls debug panel visibility
-    show_in_panel: bool = True         # route log output to the in-app debug panel
-    log_debug_messages: bool = False   # enable DEBUG-level messages (suppresses if off)
-    log_state_changes: bool = True
-    log_detections: bool = False
-    log_actions: bool = True
-    log_config_reads: bool = False
+    enabled: bool = False                # development mode master switch
+    show_log_in_panel: bool = True       # Stream 1 → panel
+    show_debug_in_panel: bool = False    # Stream 2 → panel
+    log_state_changes: bool = True       # Stream 2 sub-category
+    log_detections: bool = False         # Stream 2 sub-category
+    log_actions: bool = True             # Stream 2 sub-category
+    log_config_reads: bool = False       # Stream 2 sub-category
 
 
 @dataclass
@@ -62,7 +71,6 @@ class Settings:
     debug: DebugConfig = field(default_factory=DebugConfig)
 
     def log_file_path(self) -> Path:
-        """Return the resolved path to the main log file."""
         return project_root() / "logs" / "app.log"
 
 
@@ -86,23 +94,29 @@ def load_settings() -> Settings:
         defaults = asdict(Settings())
         merged = _deep_merge(defaults, raw)
 
-        # Strip legacy keys that no longer exist in LoggingConfig
         logging_raw = merged.pop("logging", {})
-        for old_key in ("enabled", "log_to_console"):
-            logging_raw.pop(old_key, None)
-        logging_cfg = LoggingConfig(**_deep_merge(asdict(LoggingConfig()), logging_raw))
+        for old in ("enabled", "log_to_console", "log_debug_messages"):
+            logging_raw.pop(old, None)
+        logging_cfg = LoggingConfig(**{
+            k: v for k, v in _deep_merge(asdict(LoggingConfig()), logging_raw).items()
+            if k in LoggingConfig.__dataclass_fields__
+        })
 
         debug_raw = merged.pop("debug", {})
-        # Migrate old key names
-        if "enabled" in debug_raw and "enabled" not in asdict(DebugConfig()):
-            debug_raw.pop("enabled", None)
-        debug_cfg = DebugConfig(**_deep_merge(asdict(DebugConfig()), debug_raw))
+        # Migrate old field names
+        if "log_debug_messages" in debug_raw:
+            debug_raw.setdefault("show_debug_in_panel", debug_raw.pop("log_debug_messages"))
+        if "show_in_panel" in debug_raw:
+            debug_raw.setdefault("show_log_in_panel", debug_raw.pop("show_in_panel"))
+        debug_cfg = DebugConfig(**{
+            k: v for k, v in _deep_merge(asdict(DebugConfig()), debug_raw).items()
+            if k in DebugConfig.__dataclass_fields__
+        })
 
-        # Strip keys not in Settings
-        valid_keys = {f.name for f in Settings.__dataclass_fields__.values()}
-        merged = {k: v for k, v in merged.items() if k in valid_keys}
-
+        valid = {f for f in Settings.__dataclass_fields__}
+        merged = {k: v for k, v in merged.items() if k in valid}
         return Settings(logging=logging_cfg, debug=debug_cfg, **merged)
+
     except Exception as e:
         print(f"[WARNING] Failed to load settings.json: {e} — using defaults")
         return Settings()

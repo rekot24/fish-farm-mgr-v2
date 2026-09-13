@@ -1,24 +1,23 @@
 """
 bot/app_logger.py
 
-Central logging setup and the single unified log function.
+Central logging with two independent output streams:
 
-Two output destinations:
-  1. File (app.log / errors.log) — always on for ERROR/CRITICAL;
-     app.log gated by LoggingConfig.log_to_file
-  2. Debug panel — in-app scrollable panel on the Main tab, visible only
-     when development_mode is on and DebugConfig.show_in_panel is True
+  Stream 1 — Log data (INFO/WARNING/ERROR)
+    Always written to errors.log for ERROR+.
+    Written to app.log when LoggingConfig.log_to_file is True.
+    Routed to the debug panel when DebugConfig.show_log_in_panel is True.
+    Called via: log(msg, level)
 
-Panel routing:
-  A UI callback is registered via register_panel_callback(fn) at startup.
-  log() calls it on every message when panel routing is active.
-  The callback is always called from whatever thread log() is called from —
-  the panel widget uses .after() to marshal to the Tkinter main thread.
+  Stream 2 — Debug data (verbose, cycle-by-cycle, DEBUG level)
+    Never written to file — panel only.
+    Routed to the debug panel when DebugConfig.show_debug_in_panel is True.
+    Gated per-category by log_state_changes, log_detections, etc.
+    Called via: debug(cfg, category, msg, log_fn)
 
-Usage:
-    configure(settings, project_root)     # once at startup, again on reload
-    log("worker started", "INFO")         # from anywhere
-    debug(settings.debug, "detections", "...", self._log)  # opt-in detail
+Two separate panel callbacks allow the panel to color or filter the streams
+independently if needed. In practice one callback handles both, since the
+panel already colors by level.
 """
 
 from __future__ import annotations
@@ -36,8 +35,13 @@ _logger.setLevel(logging.DEBUG)
 _logger.propagate = False
 
 _configured = False
+
+# Separate routing flags for each stream
+_route_log_to_panel: bool = False
+_route_debug_to_panel: bool = False
+
+# Single panel callback — receives (msg, level) for both streams
 _panel_callback: Optional[Callable[[str, str], None]] = None
-_route_to_panel: bool = False
 
 _LOG_FORMAT = logging.Formatter(
     "%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
@@ -47,10 +51,8 @@ _LOG_FORMAT = logging.Formatter(
 def register_panel_callback(fn: Callable[[str, str], None]) -> None:
     """
     Register the debug panel's message receiver.
-    Called once from App after the UI is built.
-
-    fn(msg, level) is called on every log() invocation when panel routing
-    is active. The panel widget is responsible for thread-safety.
+    Called once from App after UI is built.
+    fn(msg, level) — called from any thread; panel handles thread-safety.
     """
     global _panel_callback
     _panel_callback = fn
@@ -58,10 +60,10 @@ def register_panel_callback(fn: Callable[[str, str], None]) -> None:
 
 def configure(settings: Settings, root: Path) -> None:
     """
-    (Re)build logger handlers from current settings.
+    (Re)build logger handlers and routing flags from current settings.
     Safe to call multiple times — clears existing handlers first.
     """
-    global _configured, _route_to_panel
+    global _configured, _route_log_to_panel, _route_debug_to_panel
 
     for handler in list(_logger.handlers):
         _logger.removeHandler(handler)
@@ -72,46 +74,51 @@ def configure(settings: Settings, root: Path) -> None:
     cfg = settings.logging
     max_bytes = cfg.max_file_size_mb * 1024 * 1024
 
-    # errors.log — always on, ERROR and above only, never gated
+    # errors.log — ERROR+ always, never gated
     error_handler = logging.handlers.RotatingFileHandler(
-        logs_dir / "errors.log", maxBytes=max_bytes, backupCount=cfg.backup_count,
-        encoding="utf-8",
+        logs_dir / "errors.log", maxBytes=max_bytes,
+        backupCount=cfg.backup_count, encoding="utf-8",
     )
     error_handler.setLevel(logging.ERROR)
     error_handler.setFormatter(_LOG_FORMAT)
     _logger.addHandler(error_handler)
 
-    # app.log — gated by log_to_file
+    # app.log — Stream 1 to file, gated by log_to_file
     if cfg.log_to_file:
         file_handler = logging.handlers.RotatingFileHandler(
-            logs_dir / "app.log", maxBytes=max_bytes, backupCount=cfg.backup_count,
-            encoding="utf-8",
+            logs_dir / "app.log", maxBytes=max_bytes,
+            backupCount=cfg.backup_count, encoding="utf-8",
         )
         file_handler.setLevel(_level_from_name(cfg.level))
         file_handler.setFormatter(_LOG_FORMAT)
         _logger.addHandler(file_handler)
 
-    # Panel routing — active when dev mode on and show_in_panel on
-    _route_to_panel = (
-        settings.development_mode and settings.debug.show_in_panel
+    # Panel routing flags — independent of each other and of log_to_file
+    _route_log_to_panel = (
+        settings.development_mode and settings.debug.show_log_in_panel
+    )
+    _route_debug_to_panel = (
+        settings.development_mode and settings.debug.show_debug_in_panel
     )
 
     _configured = True
 
 
 def log(msg: str, level: str = "INFO") -> None:
-    """Single unified log function called by every component."""
+    """
+    Stream 1 — log data. Always goes to file (if enabled).
+    Also routed to panel when show_log_in_panel is True.
+    """
     if _configured:
         _logger.log(_level_from_name(level), msg)
     else:
         print(f"[{level}] {msg}")
 
-    # Route to debug panel if active
-    if _route_to_panel and _panel_callback is not None:
+    if _route_log_to_panel and _panel_callback is not None:
         try:
             _panel_callback(msg, level)
         except Exception:
-            pass  # never let panel errors crash the worker
+            pass
 
 
 def debug(
@@ -121,16 +128,18 @@ def debug(
     log_fn: Callable[[str, str], None],
 ) -> None:
     """
-    Layer 3 debug function. Emits msg only when:
-      1. cfg.log_debug_messages is True (master debug switch)
-      2. cfg.log_<category> is True (per-category gate)
-    Always additive — never silences normal log() calls.
+    Stream 2 — debug data. Panel only, never written to file.
+    Gated by show_debug_in_panel and the per-category toggle.
     """
-    if not cfg.log_debug_messages:
+    if not _route_debug_to_panel:
         return
     if not getattr(cfg, f"log_{category}", False):
         return
-    log_fn(f"[DEBUG:{category}] {msg}", "DEBUG")
+    if _panel_callback is not None:
+        try:
+            _panel_callback(f"[{category}] {msg}", "DEBUG")
+        except Exception:
+            pass
 
 
 def _level_from_name(level: str) -> int:
