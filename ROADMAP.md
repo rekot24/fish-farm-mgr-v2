@@ -33,54 +33,86 @@ Living document. Completed items are checked off, not deleted — history matter
 - [x] detection/detector.py
 - [x] detection/template_bank.py
 - [x] bot/app_logger.py
-- [x] tools/coordinate_finder.py
+- [x] tools/coordinate_finder.py (replaced in Phase 4)
 
 ---
 
-## Phase 2 — Core worker loop
+## Phase 2 — Core worker loop ✅ Done
 
-Push these five files to complete Phase 2.
-Commit message: `feat: Phase 2 — actions, device worker loop, device manager, updated result shape`
+- [x] bot/actions.py — ADB tap/double-tap/launch/join actions; no state logic
+- [x] bot/device_worker.py — per-device capture→detect→act loop; if/elif state dispatch
+- [x] bot/device_manager.py — owns TemplateBank, creates/stops workers, UI status interface
+- [x] main.py — wires settings, logger, DeviceManager, launches UI
+- [x] detection/result.py — updated DetectResult shape: name, found, score, bbox, center, matched_path, not_found()
+- [x] config/devices.py — tap coordinate fields (later removed in Phase 4 in favor of runtime resolution)
 
-- [ ] **bot/actions.py** *(new)* — ADB tap/double-tap/launch/join actions; no state logic
-- [ ] **bot/device_worker.py** *(new)* — per-device capture→detect→act loop; if/elif state dispatch
-- [ ] **bot/device_manager.py** *(new)* — owns TemplateBank, creates/stops workers, UI status interface
-- [ ] **main.py** *(replace stub)* — wires settings, logger, DeviceManager; UI stub (Phase 3 TODO)
-- [ ] **detection/result.py** *(replace)* — updated DetectResult shape to match detector.py: name, found, score, bbox, center, matched_path, not_found() classmethod
-- [ ] **config/devices.py** *(replace)* — adds tap coordinate fields: auto_farm_tap_x/y, end_run_tap_x/y, reconnect_tap_x/y, leave_tap_x/y (all Optional[int], default None)
-
-### Known follow-ups before Phase 3
-- template_bank.py still uses old v1 path structure (assets/shared/ and assets/devices/{serial}/)
-  rather than new v2 structure (assets/detectors/{detector_name}/). Fix is scoped to Phase 4
-  (crop tool redesign). Workers will log warnings until crop images are placed correctly.
-
----
-
-## Phase 3 — UI
-
-- [ ] ui/app.py — main window, three tabs: Main / Device / Settings
-- [ ] ui/device_card.py — per-device card widget with all controls
-- [ ] ui/device_settings_dialog.py — nickname, model, account, ADB ID, tap coordinates
-- [ ] ui/settings_dialog.py — global settings dialog
-- [ ] ui/capture_manager.py — combined capture + detector management tab (device dropdown + detector dropdown)
+### Hotfixes applied post-Phase 2
+- [x] detection/detector.py — renamed DEFAULT_TEMPLATE_CONFIDENCE → DETECTION_THRESHOLD
+- [x] config/constants.py — added missing v1 constants: ADB_DEFAULT_TIMEOUT_S, ADB_QUICK_TIMEOUT_S,
+      ADB_SCREENCAP_TIMEOUT_S, SCRCPY_PORT_RANGE_SIZE, SCRCPY_SERVER_BIND_SETTLE_S,
+      SCRCPY_DECODE_THREAD_JOIN_TIMEOUT_S, SCRCPY_TEARDOWN_TIMEOUT_S,
+      SCRCPY_SOCKET_CONNECT_ATTEMPT_TIMEOUT_S, SCRCPY_SOCKET_RETRY_SLEEP_S
 
 ---
 
-## Phase 4 — Crop tool redesign
+## Phase 3 — UI ✅ Done
 
-- [ ] tools/crop_tool.py — zoom before crop, square/circle crop, preview after capture, replace existing
-- [ ] Update detection/template_bank.py path structure from v1 (assets/shared/, assets/devices/{serial}/)
-      to v2 (assets/detectors/{detector_name}/) with files named {detector_name}_{device_id}.png
-- [ ] Shared image pool organized by detector folder
-- [ ] Per-device image assignment with shared pool fallback
-- [ ] Last tested timestamp + confidence score per detector per device
-- [ ] View assigned image inline on the Device tab
+- [x] ui/app.py — main window, four tabs: Main / Device / Capture / Settings
+- [x] ui/main_tab.py — scrollable 2-column device card grid, Start All / Stop All toolbar
+- [x] ui/device_settings_dialog.py — per-device nickname, model, account, timer intervals
+- [x] ui/settings_tab.py — global settings: private server link, timing, debug toggles
+- [x] ui/capture_tab.py — device + detector dropdowns, crop preview, detector status list
+- [x] ui/device_tab.py — device selector, identity fields, timer intervals
+- [x] ui/__init__.py
+
+### Hotfix applied post-Phase 3
+- [x] ui/capture_tab.py — fixed tk.Canvas legend dot bg (ttk.Frame has no cget("bg"))
+
+### Design decisions locked during Phase 3 UI design
+- 2-column card grid (wider window)
+- Per-card checkboxes for Auto-farm / End run / Stay awake / Lobby guard toggles
+- Toggles on card only — not duplicated in Device tab
+- Per-card Start/Stop buttons + running indicator (green/red dot + runtime)
+- Context-aware timer area: IN_TANK shows countdowns, LOBBY shows stuck timer, CRASHED shows alert bar
+- "End run" button (not "Force end run") + Settings button, split 50/50 at card bottom
+- Last action removed from card
 
 ---
 
-## Phase 5 — Validation & first run
+## Phase 4 — Crop tool redesign ✅ Done
 
-- [ ] Test private server link rejoin — confirm it works before building full recovery flow
+- [x] tools/crop_tool.py — full replacement for coordinate_finder.py
+      - Zoom in/out (scroll or buttons), Fit button
+      - Box shape: click+drag to draw; corner handles resize (locked to 90°, no trapezoid);
+        edge midpoint handles resize one axis; drag inside to move whole selection
+      - Circle shape: click+drag to draw; 2 edge handles adjust radius (stays perfect circle);
+        drag inside to move
+      - Tap override: radio button to override center; click inside selection to place amber dot;
+        offset saved as tap_offset_x/y in DetectorAssignment
+      - Save writes to assets/detectors/{detector_name}/{detector_name}_{serial}.png
+      - Updates detector_assignments in devices.json with filename, shape, timestamp
+      - Invalidates TemplateBank cache on save
+- [x] detection/template_bank.py — updated to v2 path structure (assets/detectors/{name}/)
+- [x] config/devices.py — DetectorAssignment gains shape, tap_offset_x, tap_offset_y;
+      manual tap coord fields (auto_farm_tap_x/y etc.) removed — runtime resolution via
+      template match replaces them; legacy field stripping on load for backward compat
+- [x] ui/device_settings_dialog.py — manual coord fields removed; note points to Capture tab
+- [x] ui/device_tab.py — manual coord fields removed
+- [x] ui/capture_tab.py — wired to CropTool; updated legend (this device / another device / unset);
+      tap override shown in detector list
+
+---
+
+## Phase 5 — Validation & first run 🔄 Next
+
+Connect a real device and smoke-test the full loop end-to-end.
+
+- [ ] Add device to devices.json (or via Device tab) and verify it appears on Main tab
+- [ ] Use Capture tab → Open crop tool → capture frame → verify scrcpy or ADB screencap works
+- [ ] Save crop images for at least: in_tank, auto_farm_off, lobby, end_run_button
+- [ ] Start worker — verify state detection fires correctly (watch log output)
+- [ ] Verify auto-farm double-tap fires on interval and lands correctly
+- [ ] Test private server link rejoin — confirm device re-enters game after leave
 - [ ] If link rejoin fails: design and add intermediate navigation states
 - [ ] Verify scrcpy capture not contending with action taps
 - [ ] Verify loop cadence stable at 5–10s across all devices
@@ -88,50 +120,45 @@ Commit message: `feat: Phase 2 — actions, device worker loop, device manager, 
 
 ---
 
-## Phase 6 — Coordinate cache & LOBBY recovery (design locked 2026-09-12)
+## Phase 6 — Coordinate cache & LOBBY recovery (design locked 2026-09-13)
 
-Design decisions locked this session — build after Phase 5 validates the core loop.
+Build after Phase 5 validates the core loop.
 
-### Coordinate cache
-- All click coordinates are found via template match **once per session per device** and
-  cached in memory. Subsequent taps use the cached coordinate directly — no re-detection.
-- State detection (does the button exist on screen?) still runs every cycle, unchanged.
+### Coordinate cache (design locked)
+- All click coordinates found via template match **once per session per device**, cached
+  in memory. Subsequent taps use the cached coordinate — no re-detection on every tap.
+- State detection still runs every cycle, unchanged.
 - Cache is per-device, in-memory only — never written to disk.
-- Cache is **invalidated on any Roblox relaunch** on that device (crash recovery, forced
-  update, any relaunch), because UI element positions may shift after a Roblox update.
-  Program close clears everything naturally since the cache lives in memory.
-- End-run button follows the standard detector/template system (shared or device-specific
-  crop image, same as every other detector) — the only thing unique about it is the
-  find-once caching behavior.
+- Invalidated on any Roblox relaunch (crash recovery, forced update) — positions may
+  shift after an update. Program close clears everything naturally.
+- Optional tap_offset_x/y from DetectorAssignment shifts the tap point from bbox center.
 
-### LOBBY recovery via End Run
-- LOBBY state is now a handled recovery path, not just a stuck-timer scenario.
-- Detected state LOBBY → fire end-run tap → immediate return to start position
-  (no load screen, no delay) → player walks through portal back into tank →
-  transition to IN_TANK.
-- No guard state or wait needed between the tap and resuming IN_TANK monitoring.
+### LOBBY recovery via End Run (design locked)
+- LOBBY detected → fire end-run tap → immediate return to start position (no load screen,
+  no delay) → player walks through portal back into tank → transition to IN_TANK.
+- No guard state or wait needed.
 
 ### Tasks
-- [ ] Add CoordinateCache (per-device dict: action_name → (x, y) | None) to DeviceWorker
-- [ ] On session start / Roblox relaunch: all cache entries reset to None for that device
-- [ ] Wire cache clear into existing crash/relaunch recovery path
-- [ ] Migrate all click actions to cache-lookup → (miss) detect → store → tap flow
-- [ ] Register end_run_button as a standard detector (crop image, DetectorConfig entry)
-- [ ] Implement _execute_end_run() as a real cached tap (resolves v1 bug F-02)
-- [ ] Add LOBBY → end-run tap → IN_TANK to the state dispatch
-- [ ] Add log_coordinate_cache debug category to DebugConfig (cache hits/misses/clears)
+- [ ] Add CoordinateCache (per-device dict: detector_name → (x, y) | None) to DeviceWorker
+- [ ] Cache populated on first tap per detector per session; cleared on Roblox relaunch
+- [ ] Wire cache clear into crash/relaunch recovery path
+- [ ] Migrate all click actions to: cache lookup → (miss) template match → store → tap
+- [ ] Apply tap_offset_x/y from DetectorAssignment when set (overrides bbox center)
+- [ ] Add LOBBY → end-run tap → IN_TANK to state dispatch
+- [ ] Add log_coordinate_cache debug category (hits / misses / clears, DEBUG level only)
 
 ---
 
 ## Known issues / open questions
 
-- Private server link rejoin not yet tested — if it fails, additional navigation states needed
-- Disconnected screen reconnect button sometimes does not reconnect — timer + leave fallback
-  is designed in and will be validated in Phase 5
+- Private server link rejoin not yet tested end-to-end — Phase 5 priority
+- Disconnected screen reconnect fallback (Leave after timeout) designed in, not yet validated
+- scrcpy-server.jar must be placed at assets/scrcpy-server.jar manually (not in repo)
+- assets/detectors/ folder created automatically on first crop save
 
 ---
 
 ## Future / maybe
 
-- Automated tests (deferred per dev-standards own guidance)
+- Automated tests (deferred — natural candidates: CoordinateCache, LOBBY dispatch branch)
 - scrcpy live view window per device
