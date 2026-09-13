@@ -326,6 +326,14 @@ class DeviceCard(ttk.Frame):
             self._start_stop_btn.config(text="Start")
             self._run_indicator.config(text="● Off", foreground="#dc2626")
 
+        # Clear timers and reset state badge when not running
+        if not running:
+            for w in self._timer_frame.winfo_children():
+                w.destroy()
+            self._alert_bar.pack_forget()
+            self._state_badge.config(text="OFF", fg="#9ca3af", bg="#f3f4f6")
+            return
+
         self._rebuild_timers(state, status)
 
         if cfg:

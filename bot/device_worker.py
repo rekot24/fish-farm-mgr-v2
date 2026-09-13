@@ -87,6 +87,7 @@ class DeviceWorker:
 
         self._lobby_entered_at: Optional[float] = None
         self._disconnect_detected_at: Optional[float] = None
+        self._unknown_entered_at: Optional[float] = None
 
         # Last captured frame — kept so lobby secondary checks reuse same frame
         self._last_frame = None
@@ -122,6 +123,11 @@ class DeviceWorker:
             self._thread.join(timeout=15.0)
         self._running = False
         self._start_time = None
+        self._current_state = states.UNKNOWN
+        self._last_action = "—"
+        self._lobby_entered_at = None
+        self._disconnect_detected_at = None
+        self._unknown_entered_at = None
         self._log("Worker stopped", "INFO")
 
     def get_status(self) -> dict:
@@ -143,6 +149,7 @@ class DeviceWorker:
             "end_run_countdown_s":   max(0.0, cfg.end_run_interval_s - elapsed_end),
             "stay_awake_countdown_s": max(0.0, cfg.stay_awake_interval_s - (now - self._last_stay_awake_tap)),
             "time_in_lobby_s":       time_in_lobby,
+            "time_in_unknown_s":     (now - self._unknown_entered_at) if self._unknown_entered_at else 0.0,
         }
 
     def force_end_run(self) -> None:
@@ -301,13 +308,15 @@ class DeviceWorker:
         else:
             self._reset_lobby_timer()
             self._reset_disconnect_timer()
-            self._pause_auto_farm_timer()   # pause: unknown state, not in tank
+            self._pause_auto_farm_timer()
+            self._handle_unknown(cfg, settings)
 
     # ------------------------------------------------------------------
     # State handlers
     # ------------------------------------------------------------------
 
     def _handle_in_tank(self, cfg: DeviceConfig, settings: Settings) -> None:
+        self._unknown_entered_at = None
         self._reset_lobby_timer()
         self._reset_disconnect_timer()
         now = time.monotonic()
@@ -344,51 +353,64 @@ class DeviceWorker:
                     "WARNING")
                 self._leave_and_rejoin(cfg, settings)
 
+    def _handle_unknown(self, cfg: DeviceConfig, settings: Settings) -> None:
+        """
+        Track time in UNKNOWN state. If stuck longer than unknown_stuck_threshold_s,
+        trigger a private server rejoin as a failsafe.
+        """
+        now = time.monotonic()
+        if self._unknown_entered_at is None:
+            self._unknown_entered_at = now
+            return
+
+        time_unknown = now - self._unknown_entered_at
+        if time_unknown >= settings.unknown_stuck_threshold_s:
+            self._log(
+                f"Stuck in UNKNOWN for {time_unknown:.0f}s — "
+                "forcing private server rejoin", "WARNING")
+            self._unknown_entered_at = None
+            join_private_server(self._serial, settings.private_server_link)
+            self._set_last_action("Forced rejoin (stuck in UNKNOWN)")
+            time.sleep(25.0)
+
     def _handle_auto_farm_off(self, cfg: DeviceConfig, settings: Settings) -> None:
+        self._unknown_entered_at = None
         """Auto farm is off and we're not in the lobby — single tap to re-enable."""
         self._reset_disconnect_timer()
         self._log("Auto-farm is OFF — tapping to re-enable", "INFO")
         self._do_auto_farm_tap(cfg, settings)
 
     def _handle_disconnected(self, cfg: DeviceConfig, settings: Settings) -> None:
+        self._unknown_entered_at = None
         self._reset_lobby_timer()
-        now = time.monotonic()
-
-        if self._disconnect_detected_at is None:
-            self._disconnect_detected_at = now
-            self._log("Disconnected dialog detected — tapping Reconnect", "INFO")
-            self._do_reconnect_tap(cfg)
-            return
-
-        time_disconnected = now - self._disconnect_detected_at
-        if time_disconnected >= settings.disconnect_timeout_s:
-            self._log(
-                f"Reconnect failed after {time_disconnected:.0f}s — tapping Leave",
-                "WARNING")
-            self._do_leave_tap(cfg)
-            self._reset_disconnect_timer()
+        self._log("Disconnected dialog — tapping Leave to return to home screen", "INFO")
+        self._do_leave_tap(cfg)
+        self._reset_disconnect_timer()
+        self._set_last_action("Tapped Leave (disconnected)")
 
     def _handle_crashed(self, cfg: DeviceConfig, settings: Settings) -> None:
+        self._unknown_entered_at = None
         self._reset_lobby_timer()
         self._reset_disconnect_timer()
         self._pause_auto_farm_timer()
         self._reset_end_run_timer()
-        self._log("App crashed — launching Roblox", "INFO")
-        force_stop_roblox(self._serial)
-        time.sleep(2.0)
-        launch_roblox(self._serial)
-        time.sleep(5.0)
+        self._log("App not running — joining private server directly via Chrome", "INFO")
         join_private_server(self._serial, settings.private_server_link)
+        self._set_last_action("Joined private server (crash recovery)")
+        # Wait for Roblox to load into the game after join sequence
+        time.sleep(25.0)
         self._set_last_action("Launched Roblox + joined private server")
 
     def _handle_roblox_home(self, cfg: DeviceConfig, settings: Settings) -> None:
+        self._unknown_entered_at = None
         self._reset_lobby_timer()
         self._reset_disconnect_timer()
         self._pause_auto_farm_timer()
         self._reset_end_run_timer()
-        self._log("At Roblox home screen — joining private server", "INFO")
+        self._log("At Roblox home screen — joining private server via Chrome", "INFO")
         join_private_server(self._serial, settings.private_server_link)
         self._set_last_action("Joined private server from home screen")
+        time.sleep(25.0)
 
     # ------------------------------------------------------------------
     # Action helpers

@@ -137,6 +137,8 @@ class SettingsTab(ttk.Frame):
             "Time in lobby before leaving and rejoining")
         self._disconnect_var,  _ = str_field("Disconnect timeout (s)",
             "Time before tapping Leave")
+        self._unknown_stuck_var, _ = str_field("Unknown stuck threshold (s)",
+            "Time in UNKNOWN state before forcing a private server rejoin")
         self._loop_var,        _ = str_field("Loop interval (s)",
             "How often each device captures and checks state")
 
@@ -228,6 +230,7 @@ class SettingsTab(ttk.Frame):
         self._dbl_click_var.set(str(s.double_click_delay_s))
         self._lobby_stuck_var.set(str(s.lobby_stuck_threshold_s))
         self._disconnect_var.set(str(s.disconnect_timeout_s))
+        self._unknown_stuck_var.set(str(s.unknown_stuck_threshold_s))
         self._loop_var.set(str(s.loop_interval_s))
 
         self._log_to_file_var.set(s.logging.log_to_file)

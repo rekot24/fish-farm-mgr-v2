@@ -61,6 +61,7 @@ class Settings:
     double_click_delay_s: float = DOUBLE_CLICK_DELAY_S
     lobby_stuck_threshold_s: float = LOBBY_STUCK_THRESHOLD_S
     disconnect_timeout_s: float = DISCONNECT_TIMEOUT_S
+    unknown_stuck_threshold_s: float = 60.0
     loop_interval_s: float = LOOP_INTERVAL_S
     development_mode: bool = False   # master switch for the debug panel
 
