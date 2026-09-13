@@ -23,6 +23,7 @@ from dataclasses import replace
 from typing import Callable
 
 from config.devices import DeviceConfig, save_devices
+from config.paths import adb_exe
 
 
 class DeviceTab(ttk.Frame):
@@ -138,7 +139,7 @@ class DeviceTab(ttk.Frame):
         """Discover connected ADB devices and offer unregistered ones to add."""
         try:
             result = subprocess.run(
-                ["adb", "devices"], capture_output=True, timeout=10, text=True
+                [adb_exe(), "devices"], capture_output=True, timeout=10, text=True
             )
         except Exception as e:
             messagebox.showerror("ADB error",

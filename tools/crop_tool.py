@@ -47,6 +47,7 @@ from PIL import Image, ImageTk
 
 from bot import app_logger
 from config.constants import ADB_DEFAULT_TIMEOUT_S
+from config.paths import adb_exe
 from config.devices import DetectorAssignment, DeviceConfig, load_devices, save_devices
 from config.paths import project_root
 
@@ -243,7 +244,7 @@ class CropTool(tk.Toplevel):
         def do_capture():
             try:
                 result = subprocess.run(
-                    ["adb", "-s", self._serial, "exec-out", "screencap", "-p"],
+                    [adb_exe(), "-s", self._serial, "exec-out", "screencap", "-p"],
                     capture_output=True, timeout=ADB_DEFAULT_TIMEOUT_S,
                 )
                 if result.returncode != 0 or not result.stdout:
