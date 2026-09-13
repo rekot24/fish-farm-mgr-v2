@@ -575,8 +575,8 @@ class CropTool(tk.Toplevel):
         rc = int(s["r"] * self._zoom)
 
         self._canvas.create_oval(ccx-rc, ccy-rc, ccx+rc, ccy+rc,
-                                   outline="#60a5fa", width=2,
-                                   fill="#4488ff", stipple="gray25")
+                                   outline="#60a5fa", width=3,
+                                   fill="")
 
         hs = HANDLE_SIZE
         for hx, hy in [(ccx, ccy-rc), (ccx+rc, ccy)]:
