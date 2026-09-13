@@ -184,7 +184,7 @@ class DeviceWorker:
 
         for detector_name in _DETECTOR_PRIORITY:
             result = run_detector_by_name(
-                detector_name=detector_name,
+                detector_name=states.to_detector_name(detector_name),
                 frame_bgr=frame,
                 device_serial=self._serial,
                 device_overrides=device_overrides,
@@ -219,8 +219,9 @@ class DeviceWorker:
         if self._last_frame is None:
             return False
         device_overrides = list(cfg.detector_assignments.keys())
+        detector_key = states.to_detector_name(detector_name)
         result = run_detector_by_name(
-            detector_name=detector_name,
+            detector_name=detector_key,
             frame_bgr=self._last_frame,
             device_serial=self._serial,
             device_overrides=device_overrides,
@@ -230,7 +231,7 @@ class DeviceWorker:
         if result.found:
             app_logger.debug(
                 settings.debug, "detections",
-                f"{self._serial[:8]} secondary: {detector_name} (score={result.score:.3f})",
+                f"{self._serial[:8]} secondary: {detector_key} (score={result.score:.3f})",
                 self._log,
             )
         return result.found
@@ -359,7 +360,7 @@ class DeviceWorker:
     def _do_auto_farm_double_click(self, cfg: DeviceConfig, settings: Settings) -> None:
         coords = self._resolve_tap_coords(cfg, [states.AUTO_FARM_ON, states.AUTO_FARM_OFF])
         if coords is None:
-            self._log("Auto-farm: no image assigned for auto_farm_on or auto_farm_off", "WARNING")
+            self._log("Auto-farm: no assignment found for auto_farm_on or auto_farm_off", "WARNING")
             return
         self._log("Auto-farm interval elapsed — double-clicking", "INFO")
         double_tap(self._serial, coords[0], coords[1], delay_s=settings.double_click_delay_s)
@@ -370,7 +371,7 @@ class DeviceWorker:
         """Single tap to re-enable auto farm when it's detected as OFF."""
         coords = self._resolve_tap_coords(cfg, [states.AUTO_FARM_OFF])
         if coords is None:
-            self._log("Auto-farm OFF: no image assigned for auto_farm_off", "WARNING")
+            self._log("Auto-farm OFF: no assignment found for auto_farm_off", "WARNING")
             return
         tap(self._serial, coords[0], coords[1])
         self._set_last_action("Re-enabled auto-farm (single tap)")
@@ -378,7 +379,7 @@ class DeviceWorker:
     def _do_end_run(self, cfg: DeviceConfig, settings: Settings) -> None:
         coords = self._resolve_tap_coords(cfg, [states.END_RUN_BUTTON])
         if coords is None:
-            self._log("End-run: no image assigned for end_run_button", "WARNING")
+            self._log("End-run: no assignment found for end_run_button", "WARNING")
             return
         self._log("End-run tap firing", "INFO")
         tap(self._serial, coords[0], coords[1])
@@ -419,10 +420,11 @@ class DeviceWorker:
             return None
         device_overrides = list(cfg.detector_assignments.keys())
         for name in detector_names:
-            if name not in device_overrides:
+            detector_key = states.to_detector_name(name)
+            if detector_key not in device_overrides:
                 continue
             result = run_detector_by_name(
-                detector_name=name,
+                detector_name=detector_key,
                 frame_bgr=self._last_frame,
                 device_serial=self._serial,
                 device_overrides=device_overrides,
@@ -430,7 +432,7 @@ class DeviceWorker:
                 threshold=DETECTION_THRESHOLD,
             )
             if result.found and result.center:
-                assignment = cfg.detector_assignments.get(name)
+                assignment = cfg.detector_assignments.get(detector_key)
                 if assignment and assignment.tap_offset_x is not None:
                     # Apply tap offset from crop tool
                     bbox_x = result.bbox[0] if result.bbox else result.center[0]
