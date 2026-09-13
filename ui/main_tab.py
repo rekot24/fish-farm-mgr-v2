@@ -342,8 +342,13 @@ class DeviceCard(ttk.Frame):
         if state in ("IN_TANK", "AUTO_FARM_OFF"):
             af = status.get("auto_farm_countdown_s", 0.0)
             er = status.get("end_run_countdown_s", 0.0)
+            sa = status.get("stay_awake_countdown_s", 0.0)
             _timer_col(self._timer_frame, "Auto-farm", _fmt_secs(af))
             _timer_col(self._timer_frame, "End run",   _fmt_secs(er), warn=er < 60)
+            # Only show stay-awake timer if it is enabled for this device
+            cfg = self._get_devices().get(status.get("serial", ""))
+            if cfg and cfg.stay_awake_enabled:
+                _timer_col(self._timer_frame, "Stay awake", _fmt_secs(sa))
         elif state == "LOBBY":
             time_in = status.get("time_in_lobby_s", 0.0)
             _timer_col(self._timer_frame, "In lobby", _fmt_secs(time_in), warn=time_in > 30)

@@ -78,9 +78,11 @@ class DeviceWorker:
         self._running: bool = False
         self._start_time: Optional[float] = None
 
-        self._last_auto_farm_tap: float = 0.0
-        self._last_end_run_tap: float = 0.0
-        self._last_stay_awake_tap: float = 0.0
+        # Initialize to now so first fire happens after a full interval, not instantly
+        _t = time.monotonic()
+        self._last_auto_farm_tap: float = _t
+        self._last_end_run_tap: float = _t
+        self._last_stay_awake_tap: float = _t
 
         self._lobby_entered_at: Optional[float] = None
         self._disconnect_detected_at: Optional[float] = None
@@ -136,9 +138,10 @@ class DeviceWorker:
             "state":                self._current_state,
             "last_action":          self._last_action,
             "runtime_s":            (now - self._start_time) if self._start_time else 0.0,
-            "auto_farm_countdown_s": max(0.0, cfg.auto_farm_interval_s - elapsed_auto),
-            "end_run_countdown_s":  max(0.0, cfg.end_run_interval_s - elapsed_end),
-            "time_in_lobby_s":      time_in_lobby,
+            "auto_farm_countdown_s":  max(0.0, cfg.auto_farm_interval_s - elapsed_auto),
+            "end_run_countdown_s":   max(0.0, cfg.end_run_interval_s - elapsed_end),
+            "stay_awake_countdown_s": max(0.0, cfg.stay_awake_interval_s - (now - self._last_stay_awake_tap)),
+            "time_in_lobby_s":       time_in_lobby,
         }
 
     def force_end_run(self) -> None:
