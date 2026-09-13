@@ -75,13 +75,47 @@ def launch_roblox(serial: str) -> bool:
     )
 
 
+def _build_join_deeplink(url: str) -> str:
+    """
+    Convert a Roblox share/private-server URL to a roblox:// deep link.
+
+    Handles two formats:
+      https://www.roblox.com/share?code=XXX&type=Server
+        → roblox://experiences/start?linkCode=XXX
+
+      https://www.roblox.com/games/start?placeId=XXX&linkCode=YYY
+        → roblox://experiences/start?placeId=XXX&linkCode=YYY
+
+    If already a roblox:// link, returns unchanged.
+    Falls back to original URL on any parse error.
+    """
+    if url.startswith("roblox://"):
+        return url
+    try:
+        from urllib.parse import urlparse, urlencode, parse_qs
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query, keep_blank_values=True)
+        flat = {k: v[0] for k, v in params.items()}
+
+        # Share link: /share?code=XXX&type=Server
+        if parsed.path.endswith("/share") and "code" in flat:
+            return f"roblox://experiences/start?linkCode={flat['code']}"
+
+        # Direct game link: /games/start?placeId=X&linkCode=Y
+        if "placeId" in flat:
+            return f"roblox://experiences/start?{urlencode(flat)}"
+
+        # Unknown format — return as-is
+        return url
+    except Exception:
+        return url
+
+
 def join_private_server(serial: str, server_link: str) -> bool:
     """
-    Join a Roblox private server using the share link from the server panel.
-
-    Accepts https://www.roblox.com/share?code=...&type=Server links.
-    Sends the intent directly to com.roblox.client so Android does not
-    route it through the browser.
+    Join a Roblox private server.
+    Accepts https://www.roblox.com/share?code=...&type=Server links
+    or roblox:// deep links directly.
     """
     if not server_link:
         app_logger.log(
@@ -89,13 +123,13 @@ def join_private_server(serial: str, server_link: str) -> bool:
             "Set the private server link in Settings.", "WARNING"
         )
         return False
-    app_logger.log(f"[actions] Joining via: {server_link}", "INFO")
+    deep_link = _build_join_deeplink(server_link)
+    app_logger.log(f"[actions] Joining via: {deep_link}", "INFO")
     return _adb(
         serial,
         "shell", "am", "start",
         "-a", "android.intent.action.VIEW",
-        "-n", "com.roblox.client/com.roblox.client.ActivityProtocolLaunch",
-        "-d", server_link,
+        "-d", deep_link,
     )
 
 
