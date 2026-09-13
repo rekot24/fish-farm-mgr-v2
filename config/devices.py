@@ -23,11 +23,22 @@ from config.constants import (
 class DetectorAssignment:
     """
     Tracks which image is assigned to a detector for this device,
-    and when it was last tested and with what result.
+    when it was last saved, and any tap coordinate override.
+
+    image_filename : filename within assets/detectors/{detector_name}/
+                     Named {detector_name}_{serial}.png by convention.
+    shape          : "box" or "circle" — the crop shape used when saving
+    last_tested    : ISO timestamp of last test run
+    last_score     : confidence score from last test (0.0 - 1.0)
+    tap_offset_x   : x offset within the crop image for tap override (None = use center)
+    tap_offset_y   : y offset within the crop image for tap override (None = use center)
     """
-    image_filename: Optional[str] = None   # filename within assets/detectors/{detector_name}/
-    last_tested: Optional[str] = None      # ISO timestamp of last test run
-    last_score: Optional[float] = None     # confidence score from last test (0.0 - 1.0)
+    image_filename: Optional[str] = None
+    shape: str = "box"
+    last_tested: Optional[str] = None
+    last_score: Optional[float] = None
+    tap_offset_x: Optional[int] = None
+    tap_offset_y: Optional[int] = None
 
 
 @dataclass
@@ -56,19 +67,10 @@ class DeviceConfig:
     end_run_interval_s: float = END_RUN_INTERVAL_S
     stay_awake_interval_s: float = STAY_AWAKE_INTERVAL_S
 
-    # Tap coordinates — set via the coordinate finder tool, stored per device
-    # because screen resolution varies across phone models.
-    # None means "not yet configured" — worker logs a warning if action fires without these.
-    auto_farm_tap_x: Optional[int] = None
-    auto_farm_tap_y: Optional[int] = None
-    end_run_tap_x: Optional[int] = None
-    end_run_tap_y: Optional[int] = None
-    reconnect_tap_x: Optional[int] = None
-    reconnect_tap_y: Optional[int] = None
-    leave_tap_x: Optional[int] = None
-    leave_tap_y: Optional[int] = None
-
     # Detector image assignments — keyed by detector name.
+    # Tap coordinates are derived from template match results at runtime
+    # (cached per session) rather than stored as fixed pixel values.
+    # Optional tap_offset_x/y in DetectorAssignment overrides center-of-bbox.
     detector_assignments: dict[str, DetectorAssignment] = field(default_factory=dict)
 
 
@@ -91,9 +93,20 @@ def load_devices() -> dict[str, DeviceConfig]:
         devices = {}
         for serial, entry in raw.items():
             entry = dict(entry)
+            # Strip out any legacy manual tap coordinate fields from old configs
+            for old_field in (
+                "auto_farm_tap_x", "auto_farm_tap_y",
+                "end_run_tap_x", "end_run_tap_y",
+                "reconnect_tap_x", "reconnect_tap_y",
+                "leave_tap_x", "leave_tap_y",
+            ):
+                entry.pop(old_field, None)
             assignments_raw = entry.pop("detector_assignments", {})
             assignments = {
-                name: DetectorAssignment(**vals)
+                name: DetectorAssignment(**{
+                    k: v for k, v in vals.items()
+                    if k in DetectorAssignment.__dataclass_fields__
+                })
                 for name, vals in assignments_raw.items()
             }
             devices[serial] = DeviceConfig(

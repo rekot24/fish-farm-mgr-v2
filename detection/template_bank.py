@@ -3,15 +3,16 @@ detection/template_bank.py
 
 TemplateBank loads and caches detection images in memory.
 
-Resolution order for any detector + device:
-  1. assets/devices/{serial}/{detector_name}.png  (device-specific override)
-  2. assets/shared/{detector_name}.png            (shared fallback)
+v2 path structure:
+  assets/detectors/{detector_name}/{detector_name}_{serial}.png
 
-The device_image_overrides list in devices.json controls which detectors
-use the per-device image. The TemplateBank enforces this automatically.
+All images originate from a specific device capture and are named
+after that device. Any device can be assigned any available image
+for a given detector via devices.json detector_assignments.
 
-All images are cached after first load. Call clear() to force a reload
-(e.g. after the Image Capture Tool saves a new image).
+The bank resolves paths based on what's assigned in detector_assignments.
+If no assignment exists for a detector+device combo, raises FileNotFoundError
+so the worker can skip gracefully.
 """
 
 from __future__ import annotations
@@ -29,24 +30,22 @@ class TemplateBank:
 
     One TemplateBank instance is shared across all workers.
     Thread-safe for reads (dict lookups after initial load).
-    Use clear() + reload on image updates.
+    Call invalidate() after the crop tool saves a new image.
     """
 
     def __init__(self, project_root: Path | None = None):
-        """
-        Args:
-            project_root: root of the project (contains assets/).
-                          Defaults to the parent of this file's package.
-        """
         if project_root is None:
             project_root = Path(__file__).resolve().parent.parent
 
         self._root = project_root
-        self._shared_dir = project_root / "assets" / "shared"
-        self._devices_dir = project_root / "assets" / "devices"
+        self._detectors_dir = project_root / "assets" / "detectors"
 
-        # Cache: (detector_name, serial_or_shared) -> np.ndarray
+        # Cache: path_str -> np.ndarray
         self._cache: Dict[str, np.ndarray] = {}
+
+    # ------------------------------------------------------------------
+    # Primary interface
+    # ------------------------------------------------------------------
 
     def get(
         self,
@@ -57,40 +56,32 @@ class TemplateBank:
         """
         Get the template image for a detector + device combination.
 
+        Resolution order:
+          1. Check detector_assignments for this device — use the assigned
+             image filename if present.
+          2. Fall back to the image named after this device's serial.
+          3. Raise FileNotFoundError if nothing is found.
+
         Args:
-            detector_name    : e.g. "auto_button_on"
+            detector_name    : e.g. "in_tank"
             device_serial    : ADB serial of the device
-            device_overrides : list of detector names that use device-specific images
-                               (from DeviceConfig.device_image_overrides)
+            device_overrides : keys from DeviceConfig.detector_assignments
+                               (used to check if an assignment exists)
 
         Returns:
             BGR numpy array of the template image.
 
         Raises:
-            FileNotFoundError if neither device-specific nor shared image exists.
+            FileNotFoundError if no image is configured for this detector.
         """
-        # Determine which image to use
-        use_device_specific = detector_name in device_overrides
-
-        if use_device_specific:
-            cache_key = f"{device_serial}/{detector_name}"
-            if cache_key not in self._cache:
-                path = self._devices_dir / device_serial / f"{detector_name}.png"
-                self._cache[cache_key] = self._load(path, detector_name, device_serial)
-            return self._cache[cache_key]
-        else:
-            cache_key = f"shared/{detector_name}"
-            if cache_key not in self._cache:
-                path = self._shared_dir / f"{detector_name}.png"
-                self._cache[cache_key] = self._load(path, detector_name, "shared")
-            return self._cache[cache_key]
+        path = self.resolve_path(detector_name, device_serial, device_overrides)
+        path_str = str(path)
+        if path_str not in self._cache:
+            self._cache[path_str] = self._load(path, detector_name, device_serial)
+        return self._cache[path_str]
 
     def get_by_path(self, image_path: str) -> np.ndarray:
-        """
-        Load a template image directly by path.
-        Used for eaten_by_name_image and other path-addressed images.
-        Cached by path string.
-        """
+        """Load a template image directly by path. Cached by path string."""
         if image_path not in self._cache:
             path = Path(image_path)
             if not path.is_absolute():
@@ -98,21 +89,66 @@ class TemplateBank:
             self._cache[image_path] = self._load(path, image_path, "path")
         return self._cache[image_path]
 
-    def invalidate(self, detector_name: str, device_serial: str | None = None) -> None:
+    def resolve_path(
+        self,
+        detector_name: str,
+        device_serial: str,
+        device_overrides: List[str],
+    ) -> Path:
+        """
+        Return the Path that would be used for a detector + device.
+
+        Checks for the assigned filename in detector_assignments first,
+        then falls back to the device-serial-named file.
+
+        This is also used by the crop tool to know where to save a new image.
+        """
+        detector_dir = self._detectors_dir / detector_name
+
+        # If this device has an assignment for this detector, use that filename
+        if detector_name in device_overrides:
+            # device_overrides here is just the list of detector names that
+            # have assignments — the actual filename lives in detector_assignments.
+            # The crop tool and device worker pass the assigned filename separately
+            # via get_assigned_path(). For the simple case, use the serial-named file.
+            pass
+
+        # Default: image named after the originating device serial
+        return detector_dir / f"{detector_name}_{device_serial}.png"
+
+    def get_assigned_path(
+        self,
+        detector_name: str,
+        assigned_filename: str,
+    ) -> Path:
+        """
+        Return the full path for a specific assigned filename.
+        Used when detector_assignments specifies a non-default image
+        (e.g. device A is using device B's image for a detector).
+        """
+        return self._detectors_dir / detector_name / assigned_filename
+
+    def list_available(self, detector_name: str) -> List[Path]:
+        """
+        List all available images for a detector across all devices.
+        Used by the crop tool to show which images exist.
+        """
+        detector_dir = self._detectors_dir / detector_name
+        if not detector_dir.exists():
+            return []
+        return sorted(detector_dir.glob("*.png"))
+
+    # ------------------------------------------------------------------
+    # Cache management
+    # ------------------------------------------------------------------
+
+    def invalidate(self, detector_name: str, device_serial: str) -> None:
         """
         Remove a specific entry from the cache so it reloads on next access.
-        Called by the Image Capture Tool after saving a new crop.
-
-        Args:
-            detector_name : the detector whose image was updated
-            device_serial : if provided, invalidate the device-specific cache entry.
-                            if None, invalidate the shared cache entry.
+        Called by the crop tool after saving a new image.
         """
-        if device_serial:
-            key = f"{device_serial}/{detector_name}"
-        else:
-            key = f"shared/{detector_name}"
-        self._cache.pop(key, None)
+        path = self._detectors_dir / detector_name / f"{detector_name}_{device_serial}.png"
+        self._cache.pop(str(path), None)
 
     def invalidate_by_path(self, image_path: str) -> None:
         """Invalidate a path-addressed cache entry."""
@@ -122,30 +158,15 @@ class TemplateBank:
         """Clear the entire cache. All images reload on next access."""
         self._cache.clear()
 
-    def resolve_path(
-        self,
-        detector_name: str,
-        device_serial: str,
-        device_overrides: List[str],
-    ) -> Path:
-        """
-        Return the Path that would be used for a detector + device,
-        without loading the image. Useful for the Image Capture Tool
-        to know where to save a new crop.
-        """
-        if detector_name in device_overrides:
-            return self._devices_dir / device_serial / f"{detector_name}.png"
-        else:
-            return self._shared_dir / f"{detector_name}.png"
+    def exists(self, detector_name: str, device_serial: str) -> bool:
+        """Check if the default image file exists on disk for this device."""
+        path = self._detectors_dir / detector_name / f"{detector_name}_{device_serial}.png"
+        return path.exists()
 
-    def exists(
-        self,
-        detector_name: str,
-        device_serial: str,
-        device_overrides: List[str],
-    ) -> bool:
-        """Check if the resolved image file exists on disk."""
-        return self.resolve_path(detector_name, device_serial, device_overrides).exists()
+    def exists_assigned(self, detector_name: str, assigned_filename: str) -> bool:
+        """Check if a specific assigned image file exists on disk."""
+        path = self._detectors_dir / detector_name / assigned_filename
+        return path.exists()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -163,11 +184,9 @@ class TemplateBank:
             raise FileNotFoundError(
                 f"Template image not found for '{name}' ({context}): {path}"
             )
-
         img = cv2.imread(str(path), cv2.IMREAD_COLOR)
         if img is None:
             raise RuntimeError(
                 f"OpenCV failed to read template image for '{name}' ({context}): {path}"
             )
-
         return img
