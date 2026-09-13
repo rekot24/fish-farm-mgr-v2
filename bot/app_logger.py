@@ -1,38 +1,23 @@
 """
 bot/app_logger.py
 
-Central logging setup and the single unified log function every component
-in the app calls through (dev-standards app-framework.md, Layer 7).
+Central logging setup and the single unified log function.
 
-Persistent record vs. live output:
-  Debug output (DebugConfig, Layer 3) answers "what is the app doing right
-  now" and disappears when the session ends. This module answers "what
-  happened, when" — a durable record that survives past the session, which
-  is what you need when something breaks overnight while the farm runs
-  unattended and nobody was watching.
+Two output destinations:
+  1. File (app.log / errors.log) — always on for ERROR/CRITICAL;
+     app.log gated by LoggingConfig.log_to_file
+  2. Debug panel — in-app scrollable panel on the Main tab, visible only
+     when development_mode is on and DebugConfig.show_in_panel is True
 
-One function handles all output:
-  log(msg, level) is the single call site. It always writes to the rotating
-  app.log (if logging is enabled and log_to_file is on), always writes
-  ERROR/CRITICAL to errors.log regardless of the enabled/level settings (a
-  durable failure record must not depend on the same switch that silences
-  routine noise), and optionally writes to the console. The UI display path
-  is separate (App.log() calls this, then puts the message on its own
-  thread-safe queue) — there's only one caller of this module today, so a
-  callback-registration layer for the UI would be indirection with nothing
-  behind it.
-
-Also home to debug() — the Layer 3 debug function (see its own docstring
-below). Distinct concern from log() above: log() is the persistent record;
-debug() is opt-in, additive diagnostic detail gated by DebugConfig, routed
-through the caller's own log_fn so it still reaches every normal
-destination once enabled.
+Panel routing:
+  A UI callback is registered via register_panel_callback(fn) at startup.
+  log() calls it on every message when panel routing is active.
+  The callback is always called from whatever thread log() is called from —
+  the panel widget uses .after() to marshal to the Tkinter main thread.
 
 Usage:
-    configure(settings.logging, project_root)   # once, at startup, and again
-                                                 # on every settings reload —
-                                                 # changes take effect immediately
-    log("worker started", level="INFO")         # from anywhere in the app
+    configure(settings, project_root)     # once at startup, again on reload
+    log("worker started", "INFO")         # from anywhere
     debug(settings.debug, "detections", "...", self._log)  # opt-in detail
 """
 
@@ -41,51 +26,53 @@ from __future__ import annotations
 import logging
 import logging.handlers
 from pathlib import Path
-from typing import Callable, TYPE_CHECKING
+from typing import Callable, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    # Type-only: config/settings.py itself needs to call log()/debug() (Phase
-    # 5, routing its own print()s through here), which would make a runtime
-    # import of LoggingConfig/DebugConfig from here a circular import.
-    # Neither is ever constructed or isinstance-checked below — only their
-    # attributes are read — so this costs nothing at runtime.
-    from config.settings import LoggingConfig, DebugConfig
+    from config.settings import Settings, LoggingConfig, DebugConfig
 
-
-# Module-level singleton logger — one process, one log stream.
 _logger = logging.getLogger("befish")
-_logger.setLevel(logging.DEBUG)  # let everything through to handlers; handlers filter
+_logger.setLevel(logging.DEBUG)
 _logger.propagate = False
 
 _configured = False
+_panel_callback: Optional[Callable[[str, str], None]] = None
+_route_to_panel: bool = False
 
 _LOG_FORMAT = logging.Formatter(
     "%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
 )
 
 
-def configure(cfg: LoggingConfig, project_root: Path) -> None:
+def register_panel_callback(fn: Callable[[str, str], None]) -> None:
     """
-    (Re)build the logger's handlers from a LoggingConfig.
+    Register the debug panel's message receiver.
+    Called once from App after the UI is built.
 
-    Safe to call more than once — clears existing handlers first, so a live
-    settings change (e.g. toggling log_to_console, or raising the level)
-    takes effect on the next log() call with no restart, matching the rest
-    of the app's settings pattern.
+    fn(msg, level) is called on every log() invocation when panel routing
+    is active. The panel widget is responsible for thread-safety.
     """
-    global _configured
+    global _panel_callback
+    _panel_callback = fn
+
+
+def configure(settings: Settings, root: Path) -> None:
+    """
+    (Re)build logger handlers from current settings.
+    Safe to call multiple times — clears existing handlers first.
+    """
+    global _configured, _route_to_panel
 
     for handler in list(_logger.handlers):
         _logger.removeHandler(handler)
         handler.close()
 
-    logs_dir = project_root / "logs"
+    logs_dir = root / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
+    cfg = settings.logging
     max_bytes = cfg.max_file_size_mb * 1024 * 1024
 
-    # errors.log: errors and criticals only, always on. Deliberately not
-    # gated by cfg.enabled — the whole point is a record that exists even
-    # when routine logging has been turned down or off.
+    # errors.log — always on, ERROR and above only, never gated
     error_handler = logging.handlers.RotatingFileHandler(
         logs_dir / "errors.log", maxBytes=max_bytes, backupCount=cfg.backup_count,
         encoding="utf-8",
@@ -94,7 +81,8 @@ def configure(cfg: LoggingConfig, project_root: Path) -> None:
     error_handler.setFormatter(_LOG_FORMAT)
     _logger.addHandler(error_handler)
 
-    if cfg.enabled and cfg.log_to_file:
+    # app.log — gated by log_to_file
+    if cfg.log_to_file:
         file_handler = logging.handlers.RotatingFileHandler(
             logs_dir / "app.log", maxBytes=max_bytes, backupCount=cfg.backup_count,
             encoding="utf-8",
@@ -103,51 +91,42 @@ def configure(cfg: LoggingConfig, project_root: Path) -> None:
         file_handler.setFormatter(_LOG_FORMAT)
         _logger.addHandler(file_handler)
 
-    if cfg.enabled and cfg.log_to_console:
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(_level_from_name(cfg.level))
-        console_handler.setFormatter(_LOG_FORMAT)
-        _logger.addHandler(console_handler)
+    # Panel routing — active when dev mode on and show_in_panel on
+    _route_to_panel = (
+        settings.development_mode and settings.debug.show_in_panel
+    )
 
     _configured = True
 
 
 def log(msg: str, level: str = "INFO") -> None:
-    """
-    The single unified log function. Every component's _log()/log() wrapper
-    calls this instead of print() or writing to a handler directly.
-    """
+    """Single unified log function called by every component."""
     if _configured:
         _logger.log(_level_from_name(level), msg)
     else:
-        # Called before configure() has run (shouldn't normally happen past
-        # very early startup) — fall back to console so nothing is silently
-        # lost rather than raising or dropping it.
         print(f"[{level}] {msg}")
 
+    # Route to debug panel if active
+    if _route_to_panel and _panel_callback is not None:
+        try:
+            _panel_callback(msg, level)
+        except Exception:
+            pass  # never let panel errors crash the worker
 
-def debug(cfg: DebugConfig, category: str, msg: str, log_fn: Callable[[str, str], None]) -> None:
+
+def debug(
+    cfg: DebugConfig,
+    category: str,
+    msg: str,
+    log_fn: Callable[[str, str], None],
+) -> None:
     """
-    The central Layer 3 debug function (dev-standards app-framework.md).
-
-    Emits msg at DEBUG level through log_fn — the caller's own _log()/log(),
-    so debug output reaches the same file/console/UI destinations as
-    everything else — but only if both gates pass:
-      1. cfg.enabled (the master switch)
-      2. cfg.log_<category> (the per-category flag)
-
-    This is always ADDITIVE: it supplements the always-on INFO/WARNING/
-    ERROR logs elsewhere in the app with extra, opt-in diagnostic detail.
-    It never gates or replaces an existing log line — see DebugConfig's
-    docstring in config/settings.py.
-
-    Args:
-        cfg      : settings.debug (a DebugConfig)
-        category : e.g. "detections" — checked against cfg.log_detections
-        msg      : the debug message
-        log_fn   : the caller's own log(msg, level) — e.g. DeviceWorker._log
+    Layer 3 debug function. Emits msg only when:
+      1. cfg.log_debug_messages is True (master debug switch)
+      2. cfg.log_<category> is True (per-category gate)
+    Always additive — never silences normal log() calls.
     """
-    if not cfg.enabled:
+    if not cfg.log_debug_messages:
         return
     if not getattr(cfg, f"log_{category}", False):
         return
@@ -155,5 +134,4 @@ def debug(cfg: DebugConfig, category: str, msg: str, log_fn: Callable[[str, str]
 
 
 def _level_from_name(level: str) -> int:
-    """Map a level name string to logging's numeric level. Unknown names default to INFO."""
     return getattr(logging, level.upper(), logging.INFO)
