@@ -244,6 +244,14 @@ class DeviceWorker:
     # ------------------------------------------------------------------
 
     def _act(self, state: str, cfg: DeviceConfig, settings: Settings) -> None:
+        # Stay-awake fires on its own interval regardless of game state
+        if cfg.stay_awake_enabled:
+            now = time.monotonic()
+            if now - self._last_stay_awake_tap >= cfg.stay_awake_interval_s:
+                stay_awake_tap(self._serial)
+                self._last_stay_awake_tap = now
+                self._set_last_action("Stay-awake tap")
+
         if state == states.DISCONNECTED:
             self._handle_disconnected(cfg, settings)
         elif state == states.CRASHED:
@@ -275,12 +283,6 @@ class DeviceWorker:
         self._reset_disconnect_timer()
         now = time.monotonic()
 
-        if cfg.stay_awake_enabled:
-            if now - self._last_stay_awake_tap >= cfg.stay_awake_interval_s:
-                stay_awake_tap(self._serial)
-                self._last_stay_awake_tap = now
-                self._set_last_action("Stay-awake tap")
-
         if cfg.auto_farm_enabled:
             if now - self._last_auto_farm_tap >= cfg.auto_farm_interval_s:
                 self._do_auto_farm_double_click(cfg, settings)
@@ -298,12 +300,6 @@ class DeviceWorker:
         if self._lobby_entered_at is None:
             self._lobby_entered_at = now
             self._log("Entered lobby — starting lobby timer", "INFO")
-
-        if cfg.stay_awake_enabled:
-            if now - self._last_stay_awake_tap >= cfg.stay_awake_interval_s:
-                stay_awake_tap(self._serial)
-                self._last_stay_awake_tap = now
-                self._set_last_action("Stay-awake tap (lobby)")
 
         # Secondary check: auto farm may be off while in lobby — re-enable it
         if cfg.auto_farm_enabled:
