@@ -257,11 +257,14 @@ class DeviceWorker:
         elif state in (states.DEATH_SCREEN, states.NET_REVEAL):
             self._reset_lobby_timer()
             self._reset_disconnect_timer()
+            self._pause_auto_farm_timer()   # pause: don't count time outside IN_TANK
+            self._reset_end_run_timer()     # reset: run ended naturally
         elif state == states.IN_TANK:
             self._handle_in_tank(cfg, settings)
         else:
             self._reset_lobby_timer()
             self._reset_disconnect_timer()
+            self._pause_auto_farm_timer()   # pause: unknown state, not in tank
 
     # ------------------------------------------------------------------
     # State handlers
@@ -288,6 +291,8 @@ class DeviceWorker:
 
     def _handle_lobby(self, cfg: DeviceConfig, settings: Settings) -> None:
         self._reset_disconnect_timer()
+        self._pause_auto_farm_timer()   # pause auto-farm — not in tank
+        self._reset_end_run_timer()     # reset end-run — lobby means run ended
         now = time.monotonic()
 
         if self._lobby_entered_at is None:
@@ -341,6 +346,8 @@ class DeviceWorker:
     def _handle_crashed(self, cfg: DeviceConfig, settings: Settings) -> None:
         self._reset_lobby_timer()
         self._reset_disconnect_timer()
+        self._pause_auto_farm_timer()
+        self._reset_end_run_timer()
         self._log("App crashed — launching Roblox", "INFO")
         force_stop_roblox(self._serial)
         time.sleep(2.0)
@@ -352,6 +359,8 @@ class DeviceWorker:
     def _handle_roblox_home(self, cfg: DeviceConfig, settings: Settings) -> None:
         self._reset_lobby_timer()
         self._reset_disconnect_timer()
+        self._pause_auto_farm_timer()
+        self._reset_end_run_timer()
         self._log("At Roblox home screen — joining private server", "INFO")
         join_private_server(self._serial, settings.private_server_link)
         self._set_last_action("Joined private server from home screen")
@@ -463,6 +472,23 @@ class DeviceWorker:
     def _reset_disconnect_timer(self) -> None:
         if self._disconnect_detected_at is not None:
             self._disconnect_detected_at = None
+
+    def _pause_auto_farm_timer(self) -> None:
+        """
+        Pause the auto-farm countdown by advancing the last-tap timestamp to now.
+        Effect: the countdown restarts from the full interval when back in IN_TANK.
+        Only the time spent in IN_TANK counts toward the interval.
+        """
+        self._last_auto_farm_tap = time.monotonic()
+
+    def _reset_end_run_timer(self) -> None:
+        """
+        Reset the end-run countdown to zero.
+        Called when DEATH_SCREEN, NET_REVEAL, LOBBY, CRASHED, or ROBLOX_HOME
+        is detected — the run has already ended naturally so firing end-run
+        would be redundant. Fresh countdown starts on return to IN_TANK.
+        """
+        self._last_end_run_tap = time.monotonic()
 
     # ------------------------------------------------------------------
     # Utilities
