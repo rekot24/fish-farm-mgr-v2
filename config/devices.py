@@ -56,6 +56,18 @@ class DeviceConfig:
     end_run_interval_s: float = END_RUN_INTERVAL_S
     stay_awake_interval_s: float = STAY_AWAKE_INTERVAL_S
 
+    # Tap coordinates — set via the coordinate finder tool, stored per device
+    # because screen resolution varies across phone models.
+    # None means "not yet configured" — worker logs a warning if action fires without these.
+    auto_farm_tap_x: Optional[int] = None
+    auto_farm_tap_y: Optional[int] = None
+    end_run_tap_x: Optional[int] = None
+    end_run_tap_y: Optional[int] = None
+    reconnect_tap_x: Optional[int] = None
+    reconnect_tap_y: Optional[int] = None
+    leave_tap_x: Optional[int] = None
+    leave_tap_y: Optional[int] = None
+
     # Detector image assignments — keyed by detector name.
     detector_assignments: dict[str, DetectorAssignment] = field(default_factory=dict)
 
