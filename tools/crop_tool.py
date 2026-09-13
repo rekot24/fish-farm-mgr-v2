@@ -268,7 +268,7 @@ class CropTool(tk.Toplevel):
         if self._frame is None:
             return
         delta = ZOOM_STEP if (event.num == 4 or event.delta > 0) else -ZOOM_STEP
-        self._adj_zoom(delta, mouse_cx=event.x, mouse_cy=event.y)
+        self._adj_zoom(delta, mouse_cx=int(self._canvas.canvasx(event.x)), mouse_cy=int(self._canvas.canvasy(event.y)))
 
     def _update_scroll_region(self) -> None:
         """Update canvas scroll region to match the zoomed image size."""
@@ -349,7 +349,8 @@ class CropTool(tk.Toplevel):
     def _on_mouse_down(self, event) -> None:
         if self._frame is None:
             return
-        cx, cy = event.x, event.y
+        cx = int(self._canvas.canvasx(event.x))
+        cy = int(self._canvas.canvasy(event.y))
         handle = self._hit_handle(cx, cy)
 
         if self._tap_mode.get() == "override" and self._sel is not None and handle is None:
@@ -381,7 +382,8 @@ class CropTool(tk.Toplevel):
     def _on_mouse_drag(self, event) -> None:
         if self._drag_mode is None or self._frame is None:
             return
-        cx, cy = event.x, event.y
+        cx = int(self._canvas.canvasx(event.x))
+        cy = int(self._canvas.canvasy(event.y))
         dx_c = cx - self._drag_start[0]
         dy_c = cy - self._drag_start[1]
         dx_f = int(dx_c / self._zoom)
@@ -444,9 +446,11 @@ class CropTool(tk.Toplevel):
     def _on_mouse_move(self, event) -> None:
         if self._frame is None:
             return
-        fx, fy = self._canvas_to_frame(event.x, event.y)
+        cx = int(self._canvas.canvasx(event.x))
+        cy = int(self._canvas.canvasy(event.y))
+        fx, fy = self._canvas_to_frame(cx, cy)
         self._sb_right.config(text=f"Screen: ({fx}, {fy})")
-        handle = self._hit_handle(event.x, event.y)
+        handle = self._hit_handle(cx, cy)
         if handle:
             cursors = {
                 "corner:nw": "top_left_corner", "corner:ne": "top_right_corner",
@@ -456,7 +460,7 @@ class CropTool(tk.Toplevel):
                 "circle:top": "top_side", "circle:right": "right_side",
             }
             self._canvas.config(cursor=cursors.get(handle, "crosshair"))
-        elif self._sel_contains(event.x, event.y):
+        elif self._sel_contains(cx, cy):
             self._canvas.config(cursor="fleur")
         else:
             self._canvas.config(cursor="crosshair")
