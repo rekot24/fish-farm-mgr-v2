@@ -129,6 +129,7 @@ def join_private_server(serial: str, server_link: str) -> bool:
         serial,
         "shell", "am", "start",
         "-a", "android.intent.action.VIEW",
+        "-p", "com.roblox.client",
         "-d", deep_link,
     )
 
