@@ -37,6 +37,10 @@ _DOT_SHARED  = "#2563eb"   # blue
 _DOT_DEVICE  = "#16a34a"   # green
 _DOT_UNSET   = "#9ca3af"   # gray
 
+# Background color used for small tk.Canvas dot widgets in the legend.
+# ttk.Frame does not support cget("bg") so we use a fixed dark neutral.
+_LEGEND_DOT_BG = "#1e1e1e"
+
 
 class CaptureTab(ttk.Frame):
 
@@ -86,19 +90,28 @@ class CaptureTab(ttk.Frame):
             highlightthickness=1, highlightbackground="#374151"
         )
         self._preview_canvas.pack(fill="x")
-        self._preview_text_id = self._preview_canvas.create_text(
+        self._preview_canvas.create_text(
             300, 60, text="No crop saved — select a device and detector, then capture a crop.",
             fill="#6b7280", font=("", 10), width=400, justify="center"
         )
 
-        # Legend
+        # Legend — dot canvases use a fixed bg since ttk.Frame has no cget("bg")
         legend_frame = ttk.Frame(self, padding=(12, 4))
         legend_frame.pack(fill="x")
-        for color, label in [(_DOT_SHARED, "Shared image"), (_DOT_DEVICE, "Device-specific"), (_DOT_UNSET, "Not configured")]:
-            dot = tk.Canvas(legend_frame, width=10, height=10, highlightthickness=0, bg=self.cget("bg") if hasattr(self, 'cget') else "white")
+        for color, label in [
+            (_DOT_SHARED, "Shared image"),
+            (_DOT_DEVICE, "Device-specific"),
+            (_DOT_UNSET,  "Not configured"),
+        ]:
+            dot = tk.Canvas(
+                legend_frame, width=10, height=10,
+                highlightthickness=0, bg=_LEGEND_DOT_BG
+            )
             dot.pack(side="left")
             dot.create_oval(1, 1, 9, 9, fill=color, outline="")
-            ttk.Label(legend_frame, text=label, font=("", 9), foreground="#6b7280").pack(side="left", padx=(2, 14))
+            ttk.Label(
+                legend_frame, text=label, font=("", 9), foreground="#6b7280"
+            ).pack(side="left", padx=(2, 14))
 
         ttk.Separator(self, orient="horizontal").pack(fill="x", padx=12, pady=4)
 
@@ -111,7 +124,10 @@ class CaptureTab(ttk.Frame):
             row = ttk.Frame(list_frame)
             row.pack(fill="x", pady=2)
 
-            dot_canvas = tk.Canvas(row, width=12, height=12, highlightthickness=0)
+            dot_canvas = tk.Canvas(
+                row, width=12, height=12,
+                highlightthickness=0, bg=_LEGEND_DOT_BG
+            )
             dot_canvas.pack(side="left", padx=(0, 8))
             dot_id = dot_canvas.create_oval(2, 2, 10, 10, fill=_DOT_UNSET, outline="")
 
@@ -140,7 +156,6 @@ class CaptureTab(ttk.Frame):
             self._on_selection_change()
 
     def _on_selection_change(self) -> None:
-        """Update preview and detector list when device or detector selection changes."""
         idx = self._device_combo.current()
         if idx < 0 or idx >= len(self._serial_list):
             return
@@ -148,15 +163,12 @@ class CaptureTab(ttk.Frame):
         detector = self._selected_detector.get()
         devices = self._get_devices()
         cfg = devices.get(serial)
-
         self._update_preview(serial, detector, cfg)
         self._update_detector_list(serial, cfg)
 
     def _update_preview(self, serial: str, detector: str, cfg: DeviceConfig | None) -> None:
-        """Show the saved crop image for this device+detector combo, or placeholder."""
         self._preview_canvas.delete("all")
         root = project_root()
-        # Device-specific path takes priority over shared
         paths_to_check = [
             root / "assets" / "detectors" / detector / f"{detector}_{serial}.png",
             root / "assets" / "detectors" / detector / f"{detector}_shared.png",
@@ -165,7 +177,7 @@ class CaptureTab(ttk.Frame):
             if p.exists():
                 try:
                     img = tk.PhotoImage(file=str(p))
-                    self._preview_canvas._img = img  # keep reference
+                    self._preview_canvas._img = img
                     self._preview_canvas.create_image(0, 0, anchor="nw", image=img)
                     return
                 except Exception:
@@ -177,11 +189,10 @@ class CaptureTab(ttk.Frame):
         )
 
     def _update_detector_list(self, serial: str, cfg: DeviceConfig | None) -> None:
-        """Refresh dots and scores for all detectors given the selected device."""
         root = project_root()
         for name, widgets in self._detector_rows.items():
-            dc = widgets["dot_canvas"]
-            did = widgets["dot_id"]
+            dc   = widgets["dot_canvas"]
+            did  = widgets["dot_id"]
             slbl = widgets["score_lbl"]
 
             device_path = root / "assets" / "detectors" / name / f"{name}_{serial}.png"
@@ -194,17 +205,18 @@ class CaptureTab(ttk.Frame):
             else:
                 dc.itemconfig(did, fill=_DOT_UNSET)
 
-            # Score from device config assignment
             score = None
             if cfg and name in cfg.detector_assignments:
                 score = cfg.detector_assignments[name].last_score
             if score is not None:
-                slbl.config(text=f"{score:.2f}", foreground="#16a34a" if score >= 0.80 else "#d97706")
+                slbl.config(
+                    text=f"{score:.2f}",
+                    foreground="#16a34a" if score >= 0.80 else "#d97706"
+                )
             else:
                 slbl.config(text="—", foreground="#9ca3af")
 
     def _launch_crop_tool(self) -> None:
-        """Open the coordinate/crop tool for the selected device."""
         idx = self._device_combo.current()
         if idx < 0 or idx >= len(self._serial_list):
             return
