@@ -237,9 +237,13 @@ class DeviceTab(ttk.Frame):
             row = ttk.Frame(f)
             row.pack(fill="x", pady=2)
             ttk.Label(row, text=label, width=22, anchor="w").pack(side="left")
-            var = tk.StringVar(value=str(value) if value is not None else "")
-            ttk.Entry(row, textvariable=var, width=30,
-                      state="readonly" if readonly else "normal").pack(side="left")
+            var = tk.StringVar()
+            entry = ttk.Entry(row, textvariable=var, width=30)
+            entry.pack(side="left")
+            # Set value after widget creation so readonly entries display correctly
+            var.set(str(value) if value is not None else "")
+            if readonly:
+                entry.config(state="readonly")
             return var
 
         section("Identity")

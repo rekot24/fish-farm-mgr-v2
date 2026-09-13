@@ -3,6 +3,11 @@ bot/device_manager.py
 
 Manages all connected device workers. Single point of contact between
 the UI and the workers.
+
+get_all_status() now returns an entry for every registered device,
+not just devices with active workers. Devices without workers show
+running=False and state=UNKNOWN so they appear as stopped cards
+on the Main tab immediately after being registered.
 """
 
 from __future__ import annotations
@@ -13,7 +18,7 @@ from typing import Callable
 from bot import app_logger
 from bot.device_worker import DeviceWorker
 from capture.scrcpy_socket import ScrcpySocketBackend
-from config.devices import DeviceConfig, load_devices
+from config.devices import DeviceConfig
 from config.paths import project_root, adb_exe
 from config.settings import Settings
 from detection.template_bank import TemplateBank
@@ -59,11 +64,6 @@ class DeviceManager:
         settings = self._get_settings()
         devices = self._get_devices()
 
-        if serial not in devices:
-            app_logger.log(
-                f"[manager] No config found for {serial[:8]} — using defaults", "INFO"
-            )
-
         backend = ScrcpySocketBackend(
             serial=serial,
             development_mode=settings.development_mode,
@@ -94,8 +94,9 @@ class DeviceManager:
             self._workers[serial].stop()
 
     def start_all(self) -> None:
-        serials = self.discover_devices()
-        for serial in serials:
+        """Start workers for all registered devices that are connected."""
+        devices = self._get_devices()
+        for serial in devices:
             self.start_device(serial)
 
     def stop_all(self) -> None:
@@ -104,11 +105,55 @@ class DeviceManager:
                 worker.stop()
 
     def get_all_status(self) -> list[dict]:
-        return [w.get_status() for w in self._workers.values()]
+        """
+        Return a status snapshot for every registered device.
+        Devices without an active worker show as stopped (running=False).
+        This ensures all registered devices appear on the Main tab
+        immediately, even before their worker is started.
+        """
+        devices = self._get_devices()
+        result = []
+        for serial, cfg in devices.items():
+            worker = self._workers.get(serial)
+            if worker:
+                result.append(worker.get_status())
+            else:
+                # Stopped device — return a minimal status dict
+                result.append({
+                    "serial": serial,
+                    "nickname": cfg.nickname,
+                    "model": cfg.model,
+                    "account": cfg.account,
+                    "running": False,
+                    "state": "UNKNOWN",
+                    "last_action": "—",
+                    "runtime_s": 0.0,
+                    "auto_farm_countdown_s": 0.0,
+                    "end_run_countdown_s": 0.0,
+                })
+        return result
 
     def get_status(self, serial: str) -> dict | None:
         worker = self._workers.get(serial)
-        return worker.get_status() if worker else None
+        if worker:
+            return worker.get_status()
+        # Return stopped status for registered but not-started device
+        devices = self._get_devices()
+        cfg = devices.get(serial)
+        if cfg:
+            return {
+                "serial": serial,
+                "nickname": cfg.nickname,
+                "model": cfg.model,
+                "account": cfg.account,
+                "running": False,
+                "state": "UNKNOWN",
+                "last_action": "—",
+                "runtime_s": 0.0,
+                "auto_farm_countdown_s": 0.0,
+                "end_run_countdown_s": 0.0,
+            }
+        return None
 
     def force_end_run(self, serial: str) -> None:
         worker = self._workers.get(serial)
