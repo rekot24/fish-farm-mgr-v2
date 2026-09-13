@@ -84,9 +84,44 @@ DETECTION_THRESHOLD = 0.80
 # ADB
 # ---------------------------------------------------------------------------
 
-# [TUNABLE] Timeout for ADB shell commands (seconds).
+# [TUNABLE] Timeout for standard ADB shell commands (seconds).
 # Increase for slow or high-latency devices.
 ADB_TIMEOUT_S = 10.0
 
+# [INTERNAL] Timeout for quick ADB state checks (e.g. get-state, devices).
+ADB_QUICK_TIMEOUT_S = 5.0
+
+# [INTERNAL] Default timeout for ADB commands in the capture backends.
+ADB_DEFAULT_TIMEOUT_S = 10.0
+
+# [INTERNAL] Timeout for the ADB screencap command specifically.
+# Screencap can take 300-500ms on slower devices; 15s is a generous ceiling.
+ADB_SCREENCAP_TIMEOUT_S = 15.0
+
 # [INTERNAL] Max 32-bit integer — used as "never timeout" for ADB screen_off_timeout.
 MAX_INT32 = 2_147_483_647
+
+# ---------------------------------------------------------------------------
+# Scrcpy socket backend
+# ---------------------------------------------------------------------------
+
+# [INTERNAL] Number of ports in the pool for per-device port assignment.
+# Base port is 27183; each device gets base + (hash(serial) % pool_size).
+SCRCPY_PORT_RANGE_SIZE = 100
+
+# [INTERNAL] Seconds to wait after starting the scrcpy server before
+# attempting the socket connection. Gives the server time to bind.
+SCRCPY_SERVER_BIND_SETTLE_S = 1.0
+
+# [INTERNAL] Timeout when joining the decode thread on disconnect (seconds).
+SCRCPY_DECODE_THREAD_JOIN_TIMEOUT_S = 5.0
+
+# [INTERNAL] Timeout for ADB teardown commands (port remove, pkill) (seconds).
+SCRCPY_TEARDOWN_TIMEOUT_S = 5.0
+
+# [INTERNAL] Timeout for a single socket connection attempt (seconds).
+# If the server isn't ready yet, we retry until connect_timeout_s is exceeded.
+SCRCPY_SOCKET_CONNECT_ATTEMPT_TIMEOUT_S = 1.0
+
+# [INTERNAL] Sleep between socket connection retry attempts (seconds).
+SCRCPY_SOCKET_RETRY_SLEEP_S = 0.5
