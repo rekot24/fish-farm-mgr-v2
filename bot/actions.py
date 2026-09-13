@@ -75,6 +75,30 @@ def launch_roblox(serial: str) -> bool:
     )
 
 
+def _to_roblox_deeplink(url: str) -> str:
+    """
+    Convert a Roblox web URL to a roblox:// deep link that opens
+    directly in the app without routing through the browser.
+
+    https://www.roblox.com/games/start?placeId=X&linkCode=Y
+      → roblox://experiences/start?placeId=X&linkCode=Y
+
+    If the URL is already a roblox:// link, returns it unchanged.
+    If conversion fails, returns the original URL as fallback.
+    """
+    if url.startswith("roblox://"):
+        return url
+    try:
+        from urllib.parse import urlparse, urlencode, parse_qs
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query, keep_blank_values=True)
+        # Flatten single-value lists from parse_qs
+        flat = {k: v[0] for k, v in params.items()}
+        return f"roblox://experiences/start?{urlencode(flat)}"
+    except Exception:
+        return url  # fall back to original if parsing fails
+
+
 def join_private_server(serial: str, server_link: str) -> bool:
     if not server_link:
         app_logger.log(
@@ -82,11 +106,13 @@ def join_private_server(serial: str, server_link: str) -> bool:
             "Set the private server link in Settings.", "WARNING"
         )
         return False
+    deep_link = _to_roblox_deeplink(server_link)
+    app_logger.log(f"[actions] Joining via: {deep_link}", "INFO")
     return _adb(
         serial,
         "shell", "am", "start",
         "-a", "android.intent.action.VIEW",
-        "-d", server_link,
+        "-d", deep_link,
     )
 
 
