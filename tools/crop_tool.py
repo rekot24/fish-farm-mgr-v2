@@ -43,11 +43,16 @@ MAX_ZOOM      = 5.0
 
 class CropTool(tk.Toplevel):
 
-    def __init__(self, parent, serial: str, detector_name: str, manager=None):
+    def __init__(self, parent, serial: str, detector_name: str, manager=None, detector_names: list = None):
         super().__init__(parent)
         self._serial = serial
         self._detector_name = detector_name
         self._manager = manager
+        self._detector_names = detector_names or [
+            "disconnected", "crashed", "roblox_home", "lobby",
+            "auto_farm_on", "auto_farm_off", "death_screen",
+            "net_reveal", "in_tank", "end_run_button",
+        ]
 
         self._frame: Optional[np.ndarray] = None
         self._photo: Optional[ImageTk.PhotoImage] = None
@@ -101,6 +106,16 @@ class CropTool(tk.Toplevel):
         ttk.Radiobutton(tb, text="Box",    variable=self._shape, value="box",    command=self._on_shape_change).pack(side="left", padx=2)
         ttk.Radiobutton(tb, text="Circle", variable=self._shape, value="circle", command=self._on_shape_change).pack(side="left", padx=2)
 
+        ttk.Separator(tb, orient="vertical").pack(side="left", fill="y", padx=6)
+        ttk.Label(tb, text="Detector:").pack(side="left")
+        self._detector_var = tk.StringVar(value=self._detector_name)
+        self._detector_combo = ttk.Combobox(
+            tb, textvariable=self._detector_var,
+            values=self._detector_names, state="readonly", width=18
+        )
+        self._detector_combo.pack(side="left", padx=(2, 0))
+        self._detector_combo.bind("<<ComboboxSelected>>", self._on_detector_change)
+
         self._status_label = ttk.Label(tb, text="Capture a frame to begin.", foreground="#888")
         self._status_label.pack(side="right")
 
@@ -137,7 +152,8 @@ class CropTool(tk.Toplevel):
 
     def _build_sidebar(self, f: ttk.Frame) -> None:
         ttk.Label(f, text="DETECTOR", font=("", 9), foreground="#888").grid(row=0, column=0, sticky="w")
-        ttk.Label(f, text=self._detector_name, font=("", 12, "bold")).grid(row=1, column=0, sticky="w", pady=(2, 0))
+        self._det_name_label = ttk.Label(f, text=self._detector_name, font=("", 12, "bold"))
+        self._det_name_label.grid(row=1, column=0, sticky="w", pady=(2, 0))
         ttk.Label(f, text=self._serial[:16], foreground="#888", font=("", 9)).grid(row=2, column=0, sticky="w", pady=(0, 10))
 
         ttk.Separator(f, orient="horizontal").grid(row=3, column=0, sticky="ew", pady=(0, 8))
@@ -185,6 +201,25 @@ class CropTool(tk.Toplevel):
         px = parent.winfo_rootx() + parent.winfo_width() // 2 - self.winfo_width() // 2
         py = parent.winfo_rooty() + parent.winfo_height() // 2 - self.winfo_height() // 2
         self.geometry(f"+{max(0, px)}+{max(0, py)}")
+
+    def _on_detector_change(self, event=None) -> None:
+        """Switch detector — clear selection but keep the captured frame."""
+        self._detector_name = self._detector_var.get()
+        self._sel = None
+        self._tap_offset = None
+        self._tap_mode.set("center")
+        self._save_btn.config(state="disabled")
+        # Update sidebar detector labels
+        for widget in self.winfo_children():
+            pass  # labels updated below
+        self._redraw()
+        self._update_sidebar()
+        self.title(f"Crop tool — {self._serial[:12]} · {self._detector_name}")
+        # Update sidebar detector name labels
+        try:
+            self._det_name_label.config(text=self._detector_name)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Capture

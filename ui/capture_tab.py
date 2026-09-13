@@ -23,6 +23,7 @@ DETECTOR_NAMES = [
     "crashed",
     "roblox_home",
     "lobby",
+    "auto_farm_on",
     "auto_farm_off",
     "death_screen",
     "net_reveal",
