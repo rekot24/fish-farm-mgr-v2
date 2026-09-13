@@ -192,11 +192,17 @@ class CaptureTab(ttk.Frame):
             tap_lbl = ttk.Label(row, text="", font=("", 9), foreground="#6b7280")
             tap_lbl.pack(side="left", padx=(4, 0))
 
+            # Unassign button
+            unassign_btn = ttk.Button(row, text="✕", width=2,
+                command=lambda n=name: self._unassign_detector(n))
+            unassign_btn.pack(side="left", padx=(6, 0))
+
             self._detector_rows[name] = {
                 "dot_canvas": dot_canvas, "dot_id": dot_id,
                 "img_var": img_var, "img_combo": img_combo,
                 "test_btn": test_btn, "assign_btn": assign_btn,
                 "score_lbl": score_lbl, "tap_lbl": tap_lbl,
+                "unassign_btn": unassign_btn,
             }
             # Bind dropdown change to clear score (score is per-selection)
             img_var.trace_add("write",
@@ -494,6 +500,59 @@ class CaptureTab(ttk.Frame):
         # Update preview if this is the selected detector
         if self._selected_detector.get() == detector_name:
             cfg2 = self._get_devices().get(serial)
+            self._update_preview(serial, detector_name, cfg2)
+
+    # ------------------------------------------------------------------
+    # Unassign
+    # ------------------------------------------------------------------
+
+    def _unassign_detector(self, detector_name: str) -> None:
+        """Clear the image assignment for this detector on the current device."""
+        serial = self._current_serial()
+        if not serial:
+            return
+
+        devices = self._get_devices()
+        cfg = devices.get(serial)
+        if cfg is None:
+            return
+
+        if detector_name not in cfg.detector_assignments:
+            return  # nothing to unassign
+
+        # Remove assignment
+        del cfg.detector_assignments[detector_name]
+        save_devices(devices)
+
+        # Invalidate template cache
+        if self._manager:
+            self._manager.invalidate_template(detector_name, serial)
+
+        # Reset the row
+        widgets = self._detector_rows[detector_name]
+        widgets["score_lbl"].config(text="—", foreground="#9ca3af")
+        widgets["tap_lbl"].config(text="")
+
+        # Refresh dot and dropdown
+        root = project_root()
+        device_path = root / "assets" / "detectors" / detector_name / f"{detector_name}_{serial}.png"
+        detector_dir = root / "assets" / "detectors" / detector_name
+        any_exists = detector_dir.exists() and any(detector_dir.glob("*.png"))
+
+        if device_path.exists():
+            widgets["dot_canvas"].itemconfig(widgets["dot_id"], fill=_DOT_DEVICE)
+            widgets["img_var"].set(device_path.name)
+        elif any_exists:
+            widgets["dot_canvas"].itemconfig(widgets["dot_id"], fill=_DOT_OTHER)
+            available = self._list_available_images(detector_name)
+            widgets["img_var"].set(available[0] if available else "—")
+        else:
+            widgets["dot_canvas"].itemconfig(widgets["dot_id"], fill=_DOT_UNSET)
+            widgets["img_var"].set("—")
+
+        # Refresh preview
+        cfg2 = self._get_devices().get(serial)
+        if self._selected_detector.get() == detector_name:
             self._update_preview(serial, detector_name, cfg2)
 
     # ------------------------------------------------------------------
