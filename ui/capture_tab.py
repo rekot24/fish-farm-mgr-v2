@@ -137,6 +137,8 @@ class CaptureTab(ttk.Frame):
         ttk.Label(hdr, text="", width=8).pack(side="left")   # Assign
         ttk.Label(hdr, text="Score", width=7, foreground="#6b7280",
                   font=("", 9)).pack(side="left")
+        ttk.Label(hdr, text="Assigned", width=22, foreground="#6b7280",
+                  font=("", 9)).pack(side="left", padx=(6, 0))
 
         # Scrollable detector list
         container = ttk.Frame(self)
@@ -197,12 +199,17 @@ class CaptureTab(ttk.Frame):
                 command=lambda n=name: self._unassign_detector(n))
             unassign_btn.pack(side="left", padx=(6, 0))
 
+            # Assigned filename — read-only display
+            assigned_lbl = ttk.Label(row, text="not assigned",
+                                     foreground="#9ca3af", font=("", 9), width=22)
+            assigned_lbl.pack(side="left", padx=(6, 0))
+
             self._detector_rows[name] = {
                 "dot_canvas": dot_canvas, "dot_id": dot_id,
                 "img_var": img_var, "img_combo": img_combo,
                 "test_btn": test_btn, "assign_btn": assign_btn,
                 "score_lbl": score_lbl, "tap_lbl": tap_lbl,
-                "unassign_btn": unassign_btn,
+                "unassign_btn": unassign_btn, "assigned_lbl": assigned_lbl,
             }
             # Bind dropdown change to clear score (score is per-selection)
             img_var.trace_add("write",
@@ -341,6 +348,16 @@ class CaptureTab(ttk.Frame):
                     text=f"tap ({assignment.tap_offset_x},{assignment.tap_offset_y})")
             else:
                 tap_lbl.config(text="")
+
+            # Assigned filename display
+            assigned_lbl = widgets.get("assigned_lbl")
+            if assigned_lbl:
+                if assignment and assignment.image_filename:
+                    assigned_lbl.config(
+                        text=assignment.image_filename,
+                        foreground="#16a34a")
+                else:
+                    assigned_lbl.config(text="not assigned", foreground="#9ca3af")
 
     def _on_image_selection_change(self, detector_name: str) -> None:
         """When dropdown changes, clear score — it's now unknown for this selection."""
@@ -497,6 +514,11 @@ class CaptureTab(ttk.Frame):
         else:
             widgets["dot_canvas"].itemconfig(widgets["dot_id"], fill=_DOT_OTHER)
 
+        # Update assigned label
+        assigned_lbl = widgets.get("assigned_lbl")
+        if assigned_lbl:
+            assigned_lbl.config(text=selected_image, foreground="#16a34a")
+
         # Update preview if this is the selected detector
         if self._selected_detector.get() == detector_name:
             cfg2 = self._get_devices().get(serial)
@@ -549,6 +571,11 @@ class CaptureTab(ttk.Frame):
         else:
             widgets["dot_canvas"].itemconfig(widgets["dot_id"], fill=_DOT_UNSET)
             widgets["img_var"].set("—")
+
+        # Clear assigned label
+        assigned_lbl = widgets.get("assigned_lbl")
+        if assigned_lbl:
+            assigned_lbl.config(text="not assigned", foreground="#9ca3af")
 
         # Refresh preview
         cfg2 = self._get_devices().get(serial)
