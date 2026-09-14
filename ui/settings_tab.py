@@ -124,22 +124,17 @@ class SettingsTab(ttk.Frame):
             r += 1
             return lbl
 
-        # ---- Connection ----
-        section("Connection")
-        self._server_link_var, _ = str_field("Private server link",
-            "Used for all rejoin and recovery actions")
-
         # ---- Timing ----
         section("Timing")
-        self._dbl_click_var,   _ = str_field("Double-click delay (s)",
+        self._dbl_click_var,     _ = str_field("Double-click delay (s)",
             "Pause between the two taps")
-        self._lobby_stuck_var, _ = str_field("Lobby stuck threshold (s)",
-            "Time in lobby before leaving and rejoining")
-        self._disconnect_var,  _ = str_field("Disconnect timeout (s)",
+        self._lobby_stuck_var,   _ = str_field("Lobby stuck threshold (s)",
+            "Time in lobby before firing end-run tap")
+        self._disconnect_var,    _ = str_field("Disconnect timeout (s)",
             "Time before tapping Leave")
         self._unknown_stuck_var, _ = str_field("Unknown stuck threshold (s)",
-            "Time in UNKNOWN state before forcing a private server rejoin")
-        self._loop_var,        _ = str_field("Loop interval (s)",
+            "Time in UNKNOWN state before forcing a relaunch")
+        self._loop_var,          _ = str_field("Loop interval (s)",
             "How often each device captures and checks state")
 
         # ---- Logging (Stream 1 — file) ----
@@ -180,9 +175,9 @@ class SettingsTab(ttk.Frame):
             "Debug logging",
             "Stream 2 — routes verbose cycle-by-cycle detail to the panel", indent=16)
 
-        self._log_state_var,  self._log_state_cb  = bool_field(
+        self._log_state_var,   self._log_state_cb  = bool_field(
             "Log state changes",  indent=32)
-        self._log_detect_var, self._log_detect_cb = bool_field(
+        self._log_detect_var,  self._log_detect_cb = bool_field(
             "Log detections", "Print detector scores every cycle", indent=32)
         self._log_actions_var, self._log_actions_cb = bool_field(
             "Log actions", "Print every tap and action taken", indent=32)
@@ -226,7 +221,6 @@ class SettingsTab(ttk.Frame):
         self._suppress_traces = True
         s = self._get_settings()
 
-        self._server_link_var.set(s.private_server_link)
         self._dbl_click_var.set(str(s.double_click_delay_s))
         self._lobby_stuck_var.set(str(s.lobby_stuck_threshold_s))
         self._disconnect_var.set(str(s.disconnect_timeout_s))
@@ -265,10 +259,10 @@ class SettingsTab(ttk.Frame):
 
         updated = replace(
             s,
-            private_server_link=self._server_link_var.get().strip(),
             double_click_delay_s=_float(self._dbl_click_var, s.double_click_delay_s),
             lobby_stuck_threshold_s=_float(self._lobby_stuck_var, s.lobby_stuck_threshold_s),
             disconnect_timeout_s=_float(self._disconnect_var, s.disconnect_timeout_s),
+            unknown_stuck_threshold_s=_float(self._unknown_stuck_var, s.unknown_stuck_threshold_s),
             loop_interval_s=_float(self._loop_var, s.loop_interval_s),
             development_mode=dev_mode,
             logging=replace(
@@ -298,10 +292,10 @@ class SettingsTab(ttk.Frame):
         if self._suppress_traces:
             return
 
-        dev_on       = self._dev_mode_var.get()
-        show_log     = self._show_log_var.get()
-        show_debug   = self._show_debug_var.get()
-        file_on      = self._log_to_file_var.get()
+        dev_on     = self._dev_mode_var.get()
+        show_log   = self._show_log_var.get()
+        show_debug = self._show_debug_var.get()
+        file_on    = self._log_to_file_var.get()
 
         # Log to file children — independent of dev mode
         for w in self._log_file_children:
