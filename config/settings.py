@@ -57,7 +57,6 @@ class DebugConfig:
 class Settings:
     """All global app settings."""
 
-    private_server_link: str = ""
     double_click_delay_s: float = DOUBLE_CLICK_DELAY_S
     lobby_stuck_threshold_s: float = LOBBY_STUCK_THRESHOLD_S
     disconnect_timeout_s: float = DISCONNECT_TIMEOUT_S
@@ -103,10 +102,8 @@ def load_settings() -> Settings:
 
         # Strip legacy/stale keys from debug
         debug_raw = merged.pop("debug", {})
-        # Remove old fields that no longer exist
         for old in ("enabled", "log_debug_messages"):
             debug_raw.pop(old, None)
-        # Migrate renamed fields
         if "show_in_panel" in debug_raw:
             debug_raw.setdefault("show_log_in_panel", debug_raw.pop("show_in_panel"))
         debug_cfg = DebugConfig(**{

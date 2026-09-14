@@ -3,14 +3,23 @@ bot/device_worker.py
 
 The main loop for a single device. One DeviceWorker per connected phone.
 
-Key changes from previous version:
-  - AUTO_FARM_OFF is now also checked inside _handle_lobby() so auto farm
-    gets re-enabled even when the primary state is LOBBY.
-  - get_status() now includes time_in_lobby_s for the UI card.
-  - Lobby card shows a single "In lobby" timer; no redundant stuck countdown.
-  - Tap coordinates resolved via template bank (Phase 6 cache prep):
-    auto_farm and end_run no longer rely on manual x/y fields.
-    For now, tap_x/y are resolved from the detector result center.
+Rejoin navigation is now fully state-driven — no Chrome URL, no hardcoded
+sleeps. Each detected state triggers one action that advances to the next
+state. The loop handles all waiting naturally.
+
+Fast-path rejoin (when 24rolla is visible on home screen):
+  ROBLOX_HOME → tap 24rolla_avatar → FRIEND_CARD → tap join_button → LOADING → IN_TANK
+
+Fallback rejoin (hamburger menu route):
+  ROBLOX_HOME → tap hamburger_menu → HAMBURGER_MENU_OPEN
+  → tap continue_playing_button → CONTINUE_PLAYING_SCREEN
+  → tap befish_game_icon → GAME_PAGE
+  → swipe_down_full → GAME_PAGE_SCROLLED
+  → tap servers_button → SERVER_LIST
+  → tap private_server_entry → LOADING → IN_TANK
+
+CRASHED state: launches Roblox if not running, then falls into ROBLOX_HOME
+detection naturally — no sleep, no join call.
 """
 
 from __future__ import annotations
@@ -24,9 +33,9 @@ from bot import app_logger, states
 from bot.actions import (
     double_tap,
     force_stop_roblox,
-    join_private_server,
     launch_roblox,
     stay_awake_tap,
+    swipe_down_full,
     tap,
 )
 from capture.base import CaptureBackend
@@ -41,6 +50,12 @@ _DETECTOR_PRIORITY = [
     states.DISCONNECTED,
     # CRASHED is detected via ADB process check, not screenshot — see _resolve_state()
     states.ROBLOX_HOME,
+    states.FRIEND_CARD,
+    states.HAMBURGER_MENU_OPEN,
+    states.CONTINUE_PLAYING_SCREEN,
+    states.GAME_PAGE,
+    states.GAME_PAGE_SCROLLED,
+    states.SERVER_LIST,
     states.LOBBY,
     states.AUTO_FARM_OFF,
     states.DEATH_SCREEN,
@@ -137,15 +152,15 @@ class DeviceWorker:
         elapsed_end  = now - self._last_end_run_tap
         time_in_lobby = (now - self._lobby_entered_at) if self._lobby_entered_at else 0.0
         return {
-            "serial":               self._serial,
-            "nickname":             cfg.nickname,
-            "model":                cfg.model,
-            "account":              cfg.account,
-            "running":              self._running,
-            "state":                self._current_state,
-            "last_action":          self._last_action,
-            "runtime_s":            (now - self._start_time) if self._start_time else 0.0,
-            "auto_farm_countdown_s":  max(0.0, cfg.auto_farm_interval_s - elapsed_auto),
+            "serial":                self._serial,
+            "nickname":              cfg.nickname,
+            "model":                 cfg.model,
+            "account":               cfg.account,
+            "running":               self._running,
+            "state":                 self._current_state,
+            "last_action":           self._last_action,
+            "runtime_s":             (now - self._start_time) if self._start_time else 0.0,
+            "auto_farm_countdown_s": max(0.0, cfg.auto_farm_interval_s - elapsed_auto),
             "end_run_countdown_s":   max(0.0, cfg.end_run_interval_s - elapsed_end),
             "stay_awake_countdown_s": max(0.0, cfg.stay_awake_interval_s - (now - self._last_stay_awake_tap)),
             "time_in_lobby_s":       time_in_lobby,
@@ -171,16 +186,13 @@ class DeviceWorker:
                 frame = self._capture.get_frame()
                 if frame is None:
                     self._log("Frame capture returned None — checking if Roblox is running", "WARNING")
-                    # No frame usually means scrcpy has nothing to stream — check process
                     if not self._is_roblox_foreground():
                         if not self._is_roblox_running():
-                            # Process not running at all — crash recovery
                             if self._current_state != states.CRASHED:
                                 self._log("Roblox not running — marking as CRASHED", "WARNING")
                                 self._current_state = states.CRASHED
                             self._act(states.CRASHED, cfg, settings)
                         else:
-                            # Process running but backgrounded — bring to foreground
                             self._log("Roblox is backgrounded — bringing to foreground", "WARNING")
                             launch_roblox(self._serial)
                             self._current_state = states.UNKNOWN
@@ -229,16 +241,13 @@ class DeviceWorker:
                 return detector_name
 
         # Nothing matched — check if Roblox is foreground before declaring UNKNOWN.
-        # Only runs when no other detector fired, avoiding unnecessary ADB calls.
         if not self._is_roblox_foreground():
             if not self._is_roblox_running():
-                # Process gone entirely — crash
                 if self._current_state != states.CRASHED:
                     self._log("Roblox not running — marking as CRASHED", "WARNING")
                     self._current_state = states.CRASHED
                 return states.CRASHED
             else:
-                # Process exists but backgrounded — bring to foreground
                 self._log("Roblox is backgrounded — bringing to foreground", "WARNING")
                 launch_roblox(self._serial)
                 return states.UNKNOWN
@@ -294,6 +303,18 @@ class DeviceWorker:
             self._handle_crashed(cfg, settings)
         elif state == states.ROBLOX_HOME:
             self._handle_roblox_home(cfg, settings)
+        elif state == states.FRIEND_CARD:
+            self._handle_friend_card(cfg, settings)
+        elif state == states.HAMBURGER_MENU_OPEN:
+            self._handle_hamburger_menu_open(cfg, settings)
+        elif state == states.CONTINUE_PLAYING_SCREEN:
+            self._handle_continue_playing_screen(cfg, settings)
+        elif state == states.GAME_PAGE:
+            self._handle_game_page(cfg, settings)
+        elif state == states.GAME_PAGE_SCROLLED:
+            self._handle_game_page_scrolled(cfg, settings)
+        elif state == states.SERVER_LIST:
+            self._handle_server_list(cfg, settings)
         elif state == states.LOBBY:
             self._handle_lobby(cfg, settings)
         elif state == states.AUTO_FARM_OFF:
@@ -301,8 +322,8 @@ class DeviceWorker:
         elif state in (states.DEATH_SCREEN, states.NET_REVEAL):
             self._reset_lobby_timer()
             self._reset_disconnect_timer()
-            self._pause_auto_farm_timer()   # pause: don't count time outside IN_TANK
-            self._reset_end_run_timer()     # reset: run ended naturally
+            self._pause_auto_farm_timer()
+            self._reset_end_run_timer()
         elif state == states.IN_TANK:
             self._handle_in_tank(cfg, settings)
         else:
@@ -331,8 +352,8 @@ class DeviceWorker:
 
     def _handle_lobby(self, cfg: DeviceConfig, settings: Settings) -> None:
         self._reset_disconnect_timer()
-        self._pause_auto_farm_timer()   # pause auto-farm — not in tank
-        self._reset_end_run_timer()     # reset end-run — lobby means run ended
+        self._pause_auto_farm_timer()
+        self._reset_end_run_timer()
         now = time.monotonic()
 
         if self._lobby_entered_at is None:
@@ -349,15 +370,14 @@ class DeviceWorker:
             time_in_lobby = now - self._lobby_entered_at
             if time_in_lobby >= settings.lobby_stuck_threshold_s:
                 self._log(
-                    f"Stuck in lobby for {time_in_lobby:.0f}s — leaving and rejoining",
+                    f"Stuck in lobby for {time_in_lobby:.0f}s — pressing back to home screen",
                     "WARNING")
-                self._leave_and_rejoin(cfg, settings)
+                press_back(self._serial)
+                self._reset_lobby_timer()
+                self._set_last_action("Pressed back (stuck in lobby)")
 
     def _handle_unknown(self, cfg: DeviceConfig, settings: Settings) -> None:
-        """
-        Track time in UNKNOWN state. If stuck longer than unknown_stuck_threshold_s,
-        trigger a private server rejoin as a failsafe.
-        """
+        """Track time in UNKNOWN. If stuck too long, force-stop and relaunch Roblox."""
         now = time.monotonic()
         if self._unknown_entered_at is None:
             self._unknown_entered_at = now
@@ -366,16 +386,15 @@ class DeviceWorker:
         time_unknown = now - self._unknown_entered_at
         if time_unknown >= settings.unknown_stuck_threshold_s:
             self._log(
-                f"Stuck in UNKNOWN for {time_unknown:.0f}s — "
-                "forcing private server rejoin", "WARNING")
+                f"Stuck in UNKNOWN for {time_unknown:.0f}s — force-stopping and relaunching",
+                "WARNING")
             self._unknown_entered_at = None
-            join_private_server(self._serial, settings.private_server_link)
-            self._set_last_action("Forced rejoin (stuck in UNKNOWN)")
-            time.sleep(25.0)
+            force_stop_roblox(self._serial)
+            launch_roblox(self._serial)
+            self._set_last_action("Force relaunched (stuck in UNKNOWN)")
 
     def _handle_auto_farm_off(self, cfg: DeviceConfig, settings: Settings) -> None:
         self._unknown_entered_at = None
-        """Auto farm is off and we're not in the lobby — single tap to re-enable."""
         self._reset_disconnect_timer()
         self._log("Auto-farm is OFF — tapping to re-enable", "INFO")
         self._do_auto_farm_tap(cfg, settings)
@@ -389,28 +408,105 @@ class DeviceWorker:
         self._set_last_action("Tapped Leave (disconnected)")
 
     def _handle_crashed(self, cfg: DeviceConfig, settings: Settings) -> None:
+        """App is not running — launch it. State machine takes over from ROBLOX_HOME."""
         self._unknown_entered_at = None
         self._reset_lobby_timer()
         self._reset_disconnect_timer()
         self._pause_auto_farm_timer()
         self._reset_end_run_timer()
-        self._log("App not running — joining private server directly via Chrome", "INFO")
-        join_private_server(self._serial, settings.private_server_link)
-        self._set_last_action("Joined private server (crash recovery)")
-        # Wait for Roblox to load into the game after join sequence
-        time.sleep(25.0)
-        self._set_last_action("Launched Roblox + joined private server")
+        self._log("App not running — launching Roblox", "INFO")
+        launch_roblox(self._serial)
+        self._set_last_action("Launched Roblox (crash recovery)")
 
     def _handle_roblox_home(self, cfg: DeviceConfig, settings: Settings) -> None:
+        """
+        On the Roblox home screen. Try fast path first (24rolla_avatar visible).
+        If not found, fall back to hamburger menu path.
+        """
         self._unknown_entered_at = None
         self._reset_lobby_timer()
         self._reset_disconnect_timer()
         self._pause_auto_farm_timer()
         self._reset_end_run_timer()
-        self._log("At Roblox home screen — joining private server via Chrome", "INFO")
-        join_private_server(self._serial, settings.private_server_link)
-        self._set_last_action("Joined private server from home screen")
-        time.sleep(25.0)
+
+        # Fast path: tap 24rolla's avatar to open friend card
+        coords = self._resolve_tap_coords(cfg, ["24rolla_avatar"])
+        if coords:
+            self._log("24rolla visible on home screen — tapping avatar (fast path)", "INFO")
+            tap(self._serial, coords[0], coords[1])
+            self._set_last_action("Tapped 24rolla avatar (fast path)")
+            return
+
+        # Fallback: open hamburger menu
+        coords = self._resolve_tap_coords(cfg, [states.HAMBURGER_MENU_OPEN])
+        if coords:
+            self._log("24rolla not visible — tapping hamburger menu (fallback path)", "INFO")
+            tap(self._serial, coords[0], coords[1])
+            self._set_last_action("Tapped hamburger menu (fallback path)")
+        else:
+            self._log("Neither 24rolla_avatar nor hamburger_menu found on home screen", "WARNING")
+
+    def _handle_friend_card(self, cfg: DeviceConfig, settings: Settings) -> None:
+        """Friend card is open — tap the Join button."""
+        self._unknown_entered_at = None
+        coords = self._resolve_tap_coords(cfg, ["join_button"])
+        if coords:
+            self._log("Friend card visible — tapping Join", "INFO")
+            tap(self._serial, coords[0], coords[1])
+            self._set_last_action("Tapped Join (friend card)")
+        else:
+            self._log("join_button not found on friend card", "WARNING")
+
+    def _handle_hamburger_menu_open(self, cfg: DeviceConfig, settings: Settings) -> None:
+        """Hamburger menu is open — tap Continue Playing."""
+        self._unknown_entered_at = None
+        coords = self._resolve_tap_coords(cfg, ["continue_playing_button"])
+        if coords:
+            self._log("Hamburger menu open — tapping Continue Playing", "INFO")
+            tap(self._serial, coords[0], coords[1])
+            self._set_last_action("Tapped Continue Playing")
+        else:
+            self._log("continue_playing_button not found in hamburger menu", "WARNING")
+
+    def _handle_continue_playing_screen(self, cfg: DeviceConfig, settings: Settings) -> None:
+        """Continue Playing screen — tap the Be Fish game icon."""
+        self._unknown_entered_at = None
+        coords = self._resolve_tap_coords(cfg, ["befish_game_icon"])
+        if coords:
+            self._log("Continue Playing screen — tapping Be Fish", "INFO")
+            tap(self._serial, coords[0], coords[1])
+            self._set_last_action("Tapped Be Fish game icon")
+        else:
+            self._log("befish_game_icon not found on Continue Playing screen", "WARNING")
+
+    def _handle_game_page(self, cfg: DeviceConfig, settings: Settings) -> None:
+        """On the game page — swipe all the way down to reveal the Servers button."""
+        self._unknown_entered_at = None
+        self._log("Game page — swiping down to reveal Servers button", "INFO")
+        swipe_down_full(self._serial)
+        self._set_last_action("Swiped down on game page")
+
+    def _handle_game_page_scrolled(self, cfg: DeviceConfig, settings: Settings) -> None:
+        """Game page is scrolled — tap the Servers button."""
+        self._unknown_entered_at = None
+        coords = self._resolve_tap_coords(cfg, ["servers_button"])
+        if coords:
+            self._log("Game page scrolled — tapping Servers", "INFO")
+            tap(self._serial, coords[0], coords[1])
+            self._set_last_action("Tapped Servers button")
+        else:
+            self._log("servers_button not found on scrolled game page", "WARNING")
+
+    def _handle_server_list(self, cfg: DeviceConfig, settings: Settings) -> None:
+        """Server list is open — tap the private server entry."""
+        self._unknown_entered_at = None
+        coords = self._resolve_tap_coords(cfg, ["private_server_entry"])
+        if coords:
+            self._log("Server list open — tapping private server", "INFO")
+            tap(self._serial, coords[0], coords[1])
+            self._set_last_action("Tapped private server entry")
+        else:
+            self._log("private_server_entry not found in server list", "WARNING")
 
     # ------------------------------------------------------------------
     # Action helpers
@@ -445,18 +541,7 @@ class DeviceWorker:
         self._last_end_run_tap = time.monotonic()
         self._set_last_action("End-run tap")
 
-    def _do_reconnect_tap(self, cfg: DeviceConfig) -> None:
-        coords = self._resolve_tap_coords(cfg, [states.DISCONNECTED])
-        if coords is None:
-            self._log("Reconnect: no image assigned for disconnected", "WARNING")
-            return
-        tap(self._serial, coords[0], coords[1])
-        self._set_last_action("Tapped Reconnect")
-
     def _do_leave_tap(self, cfg: DeviceConfig) -> None:
-        # Leave button is a separate region on the disconnected screen
-        # For now reuse disconnected detector center — Phase 6 will add
-        # a dedicated leave_button detector if needed
         coords = self._resolve_tap_coords(cfg, [states.DISCONNECTED])
         if coords is None:
             self._log("Leave: no image assigned for disconnected", "WARNING")
@@ -473,7 +558,6 @@ class DeviceWorker:
         Find tap coordinates by running template match for the first assigned
         detector in detector_names that has a match on the current frame.
         Returns (x, y) center of the match, or None if nothing matched.
-        Phase 6 will add caching on top of this.
         """
         if self._last_frame is None:
             return None
@@ -493,20 +577,12 @@ class DeviceWorker:
             if result.found and result.center:
                 assignment = cfg.detector_assignments.get(detector_key)
                 if assignment and assignment.tap_offset_x is not None:
-                    # Apply tap offset from crop tool
                     bbox_x = result.bbox[0] if result.bbox else result.center[0]
                     bbox_y = result.bbox[1] if result.bbox else result.center[1]
                     return (bbox_x + assignment.tap_offset_x,
                             bbox_y + assignment.tap_offset_y)
                 return result.center
         return None
-
-    def _leave_and_rejoin(self, cfg: DeviceConfig, settings: Settings) -> None:
-        self._do_leave_tap(cfg)
-        time.sleep(3.0)
-        join_private_server(self._serial, settings.private_server_link)
-        self._reset_lobby_timer()
-        self._set_last_action("Left + rejoined (stuck in lobby)")
 
     # ------------------------------------------------------------------
     # Timer helpers
@@ -531,8 +607,7 @@ class DeviceWorker:
     def _reset_end_run_timer(self) -> None:
         """
         Reset the end-run countdown to zero.
-        Called when DEATH_SCREEN, NET_REVEAL, LOBBY, CRASHED, or ROBLOX_HOME
-        is detected — the run has already ended naturally so firing end-run
+        Called when the run has already ended naturally so firing end-run
         would be redundant. Fresh countdown starts on return to IN_TANK.
         """
         self._last_end_run_tap = time.monotonic()
@@ -544,8 +619,6 @@ class DeviceWorker:
     def _is_roblox_foreground(self) -> bool:
         """
         Check if Roblox is the active foreground app via ADB.
-        Uses dumpsys activity to find the resumed activity.
-        Returns True only if com.roblox.client is the foreground app.
         Defaults to True on error to avoid false recovery loops.
         """
         try:
@@ -556,7 +629,6 @@ class DeviceWorker:
                 capture_output=True, timeout=8.0,
             )
             output = result.stdout.decode("utf-8", errors="replace")
-            # Look for the resumed activity line
             for line in output.splitlines():
                 if "mResumedActivity" in line or "ResumedActivity" in line:
                     is_foreground = "com.roblox.client" in line
@@ -565,18 +637,14 @@ class DeviceWorker:
                         "DEBUG" if is_foreground else "WARNING",
                     )
                     return is_foreground
-            # No resumed activity line found — assume not foreground
             self._log("Could not determine foreground app", "WARNING")
             return False
         except Exception as e:
             self._log(f"Foreground check failed: {e}", "WARNING")
-            return True  # assume foreground on error to avoid false recovery
+            return True
 
     def _is_roblox_running(self) -> bool:
-        """
-        Check if Roblox process exists at all (running or backgrounded).
-        Uses ps -A — universally supported on Android.
-        """
+        """Check if Roblox process exists at all (running or backgrounded)."""
         try:
             from config.paths import adb_exe
             result = subprocess.run(

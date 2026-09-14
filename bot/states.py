@@ -11,17 +11,25 @@ assignment keys in devices.json use the detector name (lowercase).
 The worker normalizes via states.to_detector_name() when doing lookups.
 """
 
-IN_TANK       = "IN_TANK"
-AUTO_FARM_ON  = "AUTO_FARM_ON"
-AUTO_FARM_OFF = "AUTO_FARM_OFF"
-DEATH_SCREEN  = "DEATH_SCREEN"
-NET_REVEAL    = "NET_REVEAL"
-LOBBY         = "LOBBY"
-DISCONNECTED  = "DISCONNECTED"
-CRASHED       = "CRASHED"
-ROBLOX_HOME   = "ROBLOX_HOME"
-END_RUN_BUTTON = "END_RUN_BUTTON"
-UNKNOWN       = "UNKNOWN"
+IN_TANK                  = "IN_TANK"
+AUTO_FARM_ON             = "AUTO_FARM_ON"
+AUTO_FARM_OFF            = "AUTO_FARM_OFF"
+DEATH_SCREEN             = "DEATH_SCREEN"
+NET_REVEAL               = "NET_REVEAL"
+LOBBY                    = "LOBBY"
+DISCONNECTED             = "DISCONNECTED"
+CRASHED                  = "CRASHED"
+ROBLOX_HOME              = "ROBLOX_HOME"
+END_RUN_BUTTON           = "END_RUN_BUTTON"
+UNKNOWN                  = "UNKNOWN"
+
+# --- Rejoin navigation states ---
+FRIEND_CARD              = "FRIEND_CARD"
+HAMBURGER_MENU_OPEN      = "HAMBURGER_MENU_OPEN"
+CONTINUE_PLAYING_SCREEN  = "CONTINUE_PLAYING_SCREEN"
+GAME_PAGE                = "GAME_PAGE"
+GAME_PAGE_SCROLLED       = "GAME_PAGE_SCROLLED"
+SERVER_LIST              = "SERVER_LIST"
 
 
 def to_detector_name(state: str) -> str:
