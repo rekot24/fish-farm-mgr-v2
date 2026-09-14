@@ -370,11 +370,11 @@ class DeviceWorker:
             time_in_lobby = now - self._lobby_entered_at
             if time_in_lobby >= settings.lobby_stuck_threshold_s:
                 self._log(
-                    f"Stuck in lobby for {time_in_lobby:.0f}s — pressing back to home screen",
+                    f"Stuck in lobby for {time_in_lobby:.0f}s — firing end-run tap",
                     "WARNING")
-                press_back(self._serial)
+                self._do_end_run(cfg, settings)
                 self._reset_lobby_timer()
-                self._set_last_action("Pressed back (stuck in lobby)")
+                self._set_last_action("End-run tap (stuck in lobby)")
 
     def _handle_unknown(self, cfg: DeviceConfig, settings: Settings) -> None:
         """Track time in UNKNOWN. If stuck too long, force-stop and relaunch Roblox."""
