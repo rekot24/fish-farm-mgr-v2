@@ -130,8 +130,6 @@ class SettingsTab(ttk.Frame):
             "Pause between the two taps")
         self._lobby_stuck_var,   _ = str_field("Lobby stuck threshold (s)",
             "Time in lobby before firing end-run tap")
-        self._disconnect_var,    _ = str_field("Disconnect timeout (s)",
-            "Time before tapping Leave")
         self._unknown_stuck_var, _ = str_field("Unknown stuck threshold (s)",
             "Time in UNKNOWN state before forcing a relaunch")
         self._loop_var,          _ = str_field("Loop interval (s)",
@@ -142,7 +140,6 @@ class SettingsTab(ttk.Frame):
         self._log_to_file_var, self._log_to_file_cb = bool_field(
             "Log to file", "Write session log to logs/app.log")
 
-        # Log file path — readonly display
         lf = ttk.Frame(f)
         lf.grid(row=r, column=0, sticky="w", padx=(16, 0), pady=2)
         ttk.Label(lf, text="Log file", font=("", 10)).pack(anchor="w")
@@ -197,7 +194,6 @@ class SettingsTab(ttk.Frame):
 
         f.columnconfigure(0, weight=1)
 
-        # Wire traces
         for var in (self._log_to_file_var, self._dev_mode_var,
                     self._show_log_var, self._show_debug_var):
             var.trace_add("write", lambda *_: self._update_state())
@@ -223,7 +219,6 @@ class SettingsTab(ttk.Frame):
 
         self._dbl_click_var.set(str(s.double_click_delay_s))
         self._lobby_stuck_var.set(str(s.lobby_stuck_threshold_s))
-        self._disconnect_var.set(str(s.disconnect_timeout_s))
         self._unknown_stuck_var.set(str(s.unknown_stuck_threshold_s))
         self._loop_var.set(str(s.loop_interval_s))
 
@@ -249,7 +244,6 @@ class SettingsTab(ttk.Frame):
 
         s = self._get_settings()
 
-        # Auto-disable dev mode if both streams are off
         dev_mode = self._dev_mode_var.get()
         if dev_mode and not self._show_log_var.get() and not self._show_debug_var.get():
             dev_mode = False
@@ -261,7 +255,6 @@ class SettingsTab(ttk.Frame):
             s,
             double_click_delay_s=_float(self._dbl_click_var, s.double_click_delay_s),
             lobby_stuck_threshold_s=_float(self._lobby_stuck_var, s.lobby_stuck_threshold_s),
-            disconnect_timeout_s=_float(self._disconnect_var, s.disconnect_timeout_s),
             unknown_stuck_threshold_s=_float(self._unknown_stuck_var, s.unknown_stuck_threshold_s),
             loop_interval_s=_float(self._loop_var, s.loop_interval_s),
             development_mode=dev_mode,
@@ -297,7 +290,6 @@ class SettingsTab(ttk.Frame):
         show_debug = self._show_debug_var.get()
         file_on    = self._log_to_file_var.get()
 
-        # Log to file children — independent of dev mode
         for w in self._log_file_children:
             w.config(state="normal" if file_on else "disabled")
         if file_on:
@@ -305,15 +297,12 @@ class SettingsTab(ttk.Frame):
         else:
             self._log_off_note.grid()
 
-        # Dev mode children
         for w in self._debug_children:
             w.config(state="normal" if dev_on else "disabled")
 
-        # Debug sub-categories — need debug logging on
         for w in self._debug_sub_children:
             w.config(state="normal" if (dev_on and show_debug) else "disabled")
 
-        # Auto-disable note — both streams off while dev mode on
         both_off = dev_on and not show_log and not show_debug
         if both_off:
             self._auto_off_note.grid()

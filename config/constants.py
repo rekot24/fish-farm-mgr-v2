@@ -48,16 +48,8 @@ END_RUN_INTERVAL_S = 1800.0  # 30 minutes
 # ---------------------------------------------------------------------------
 
 # [TUNABLE] How long a device can be in the lobby before it is considered stuck
-# and the leave-and-rejoin recovery is triggered (seconds).
+# and an end-run tap is fired (seconds).
 LOBBY_STUCK_THRESHOLD_S = 60.0
-
-# ---------------------------------------------------------------------------
-# Disconnected screen
-# ---------------------------------------------------------------------------
-
-# [TUNABLE] How long to wait for a reconnect attempt before giving up and
-# tapping Leave instead (seconds).
-DISCONNECT_TIMEOUT_S = 60.0
 
 # ---------------------------------------------------------------------------
 # Stay-awake

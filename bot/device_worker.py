@@ -3,9 +3,9 @@ bot/device_worker.py
 
 The main loop for a single device. One DeviceWorker per connected phone.
 
-Rejoin navigation is now fully state-driven — no Chrome URL, no hardcoded
-sleeps. Each detected state triggers one action that advances to the next
-state. The loop handles all waiting naturally.
+Rejoin navigation is fully state-driven — no Chrome URL, no hardcoded sleeps.
+Each detected state triggers one action that advances to the next state.
+The loop handles all waiting naturally.
 
 Fast-path rejoin (when 24rolla is visible on home screen):
   ROBLOX_HOME → tap 24rolla_avatar → FRIEND_CARD → tap join_button → LOADING → IN_TANK
@@ -20,6 +20,9 @@ Fallback rejoin (hamburger menu route):
 
 CRASHED state: launches Roblox if not running, then falls into ROBLOX_HOME
 detection naturally — no sleep, no join call.
+
+DISCONNECTED state: fires immediately on detection — taps the Leave button
+found via the disconnected detector's tap offset. No timer involved.
 """
 
 from __future__ import annotations
@@ -63,11 +66,6 @@ _DETECTOR_PRIORITY = [
     states.IN_TANK,
 ]
 
-# Detectors checked inside lobby to catch auto-farm state
-_LOBBY_SECONDARY_CHECKS = [
-    states.AUTO_FARM_OFF,
-]
-
 
 class DeviceWorker:
 
@@ -94,17 +92,14 @@ class DeviceWorker:
         self._running: bool = False
         self._start_time: Optional[float] = None
 
-        # Initialize to now so first fire happens after a full interval, not instantly
         _t = time.monotonic()
         self._last_auto_farm_tap: float = _t
         self._last_end_run_tap: float = _t
         self._last_stay_awake_tap: float = _t
 
         self._lobby_entered_at: Optional[float] = None
-        self._disconnect_detected_at: Optional[float] = None
         self._unknown_entered_at: Optional[float] = None
 
-        # Last captured frame — kept so lobby secondary checks reuse same frame
         self._last_frame = None
 
     # ------------------------------------------------------------------
@@ -141,7 +136,6 @@ class DeviceWorker:
         self._current_state = states.UNKNOWN
         self._last_action = "—"
         self._lobby_entered_at = None
-        self._disconnect_detected_at = None
         self._unknown_entered_at = None
         self._log("Worker stopped", "INFO")
 
@@ -240,7 +234,6 @@ class DeviceWorker:
                     self._current_state = detector_name
                 return detector_name
 
-        # Nothing matched — check if Roblox is foreground before declaring UNKNOWN.
         if not self._is_roblox_foreground():
             if not self._is_roblox_running():
                 if self._current_state != states.CRASHED:
@@ -259,11 +252,6 @@ class DeviceWorker:
 
     def _check_secondary(self, detector_name: str, cfg: DeviceConfig,
                           settings: Settings) -> bool:
-        """
-        Run a secondary detector check on the current frame without changing
-        the primary state. Used to detect AUTO_FARM_OFF while in LOBBY.
-        Returns True if the detector matched.
-        """
         if self._last_frame is None:
             return False
         device_overrides = list(cfg.detector_assignments.keys())
@@ -289,7 +277,6 @@ class DeviceWorker:
     # ------------------------------------------------------------------
 
     def _act(self, state: str, cfg: DeviceConfig, settings: Settings) -> None:
-        # Stay-awake fires on its own interval regardless of game state
         if cfg.stay_awake_enabled:
             now = time.monotonic()
             if now - self._last_stay_awake_tap >= cfg.stay_awake_interval_s:
@@ -321,14 +308,12 @@ class DeviceWorker:
             self._handle_auto_farm_off(cfg, settings)
         elif state in (states.DEATH_SCREEN, states.NET_REVEAL):
             self._reset_lobby_timer()
-            self._reset_disconnect_timer()
             self._pause_auto_farm_timer()
             self._reset_end_run_timer()
         elif state == states.IN_TANK:
             self._handle_in_tank(cfg, settings)
         else:
             self._reset_lobby_timer()
-            self._reset_disconnect_timer()
             self._pause_auto_farm_timer()
             self._handle_unknown(cfg, settings)
 
@@ -339,7 +324,6 @@ class DeviceWorker:
     def _handle_in_tank(self, cfg: DeviceConfig, settings: Settings) -> None:
         self._unknown_entered_at = None
         self._reset_lobby_timer()
-        self._reset_disconnect_timer()
         now = time.monotonic()
 
         if cfg.auto_farm_enabled:
@@ -351,7 +335,6 @@ class DeviceWorker:
                 self._do_end_run(cfg, settings)
 
     def _handle_lobby(self, cfg: DeviceConfig, settings: Settings) -> None:
-        self._reset_disconnect_timer()
         self._pause_auto_farm_timer()
         self._reset_end_run_timer()
         now = time.monotonic()
@@ -360,7 +343,6 @@ class DeviceWorker:
             self._lobby_entered_at = now
             self._log("Entered lobby — starting lobby timer", "INFO")
 
-        # Secondary check: auto farm may be off while in lobby — re-enable it
         if cfg.auto_farm_enabled:
             if self._check_secondary(states.AUTO_FARM_OFF, cfg, settings):
                 self._log("Auto-farm is OFF in lobby — tapping to re-enable", "INFO")
@@ -377,7 +359,6 @@ class DeviceWorker:
                 self._set_last_action("End-run tap (stuck in lobby)")
 
     def _handle_unknown(self, cfg: DeviceConfig, settings: Settings) -> None:
-        """Track time in UNKNOWN. If stuck too long, force-stop and relaunch Roblox."""
         now = time.monotonic()
         if self._unknown_entered_at is None:
             self._unknown_entered_at = now
@@ -395,23 +376,24 @@ class DeviceWorker:
 
     def _handle_auto_farm_off(self, cfg: DeviceConfig, settings: Settings) -> None:
         self._unknown_entered_at = None
-        self._reset_disconnect_timer()
         self._log("Auto-farm is OFF — tapping to re-enable", "INFO")
         self._do_auto_farm_tap(cfg, settings)
 
     def _handle_disconnected(self, cfg: DeviceConfig, settings: Settings) -> None:
+        """
+        Disconnected dialog detected — tap the Leave button immediately.
+        The disconnected detector's tap offset points at the Leave button.
+        No timer; fires on every cycle the state is active until it clears.
+        """
         self._unknown_entered_at = None
         self._reset_lobby_timer()
-        self._log("Disconnected dialog — tapping Leave to return to home screen", "INFO")
+        self._log("Disconnected dialog — tapping Leave", "INFO")
         self._do_leave_tap(cfg)
-        self._reset_disconnect_timer()
         self._set_last_action("Tapped Leave (disconnected)")
 
     def _handle_crashed(self, cfg: DeviceConfig, settings: Settings) -> None:
-        """App is not running — launch it. State machine takes over from ROBLOX_HOME."""
         self._unknown_entered_at = None
         self._reset_lobby_timer()
-        self._reset_disconnect_timer()
         self._pause_auto_farm_timer()
         self._reset_end_run_timer()
         self._log("App not running — launching Roblox", "INFO")
@@ -419,17 +401,11 @@ class DeviceWorker:
         self._set_last_action("Launched Roblox (crash recovery)")
 
     def _handle_roblox_home(self, cfg: DeviceConfig, settings: Settings) -> None:
-        """
-        On the Roblox home screen. Try fast path first (24rolla_avatar visible).
-        If not found, fall back to hamburger menu path.
-        """
         self._unknown_entered_at = None
         self._reset_lobby_timer()
-        self._reset_disconnect_timer()
         self._pause_auto_farm_timer()
         self._reset_end_run_timer()
 
-        # Fast path: tap 24rolla's avatar to open friend card
         coords = self._resolve_tap_coords(cfg, ["24rolla_avatar"])
         if coords:
             self._log("24rolla visible on home screen — tapping avatar (fast path)", "INFO")
@@ -437,7 +413,6 @@ class DeviceWorker:
             self._set_last_action("Tapped 24rolla avatar (fast path)")
             return
 
-        # Fallback: open hamburger menu
         coords = self._resolve_tap_coords(cfg, [states.HAMBURGER_MENU_OPEN])
         if coords:
             self._log("24rolla not visible — tapping hamburger menu (fallback path)", "INFO")
@@ -447,7 +422,6 @@ class DeviceWorker:
             self._log("Neither 24rolla_avatar nor hamburger_menu found on home screen", "WARNING")
 
     def _handle_friend_card(self, cfg: DeviceConfig, settings: Settings) -> None:
-        """Friend card is open — tap the Join button."""
         self._unknown_entered_at = None
         coords = self._resolve_tap_coords(cfg, ["join_button"])
         if coords:
@@ -458,7 +432,6 @@ class DeviceWorker:
             self._log("join_button not found on friend card", "WARNING")
 
     def _handle_hamburger_menu_open(self, cfg: DeviceConfig, settings: Settings) -> None:
-        """Hamburger menu is open — tap Continue Playing."""
         self._unknown_entered_at = None
         coords = self._resolve_tap_coords(cfg, ["continue_playing_button"])
         if coords:
@@ -469,7 +442,6 @@ class DeviceWorker:
             self._log("continue_playing_button not found in hamburger menu", "WARNING")
 
     def _handle_continue_playing_screen(self, cfg: DeviceConfig, settings: Settings) -> None:
-        """Continue Playing screen — tap the Be Fish game icon."""
         self._unknown_entered_at = None
         coords = self._resolve_tap_coords(cfg, ["befish_game_icon"])
         if coords:
@@ -480,14 +452,12 @@ class DeviceWorker:
             self._log("befish_game_icon not found on Continue Playing screen", "WARNING")
 
     def _handle_game_page(self, cfg: DeviceConfig, settings: Settings) -> None:
-        """On the game page — swipe all the way down to reveal the Servers button."""
         self._unknown_entered_at = None
         self._log("Game page — swiping down to reveal Servers button", "INFO")
         swipe_down_full(self._serial)
         self._set_last_action("Swiped down on game page")
 
     def _handle_game_page_scrolled(self, cfg: DeviceConfig, settings: Settings) -> None:
-        """Game page is scrolled — tap the Servers button."""
         self._unknown_entered_at = None
         coords = self._resolve_tap_coords(cfg, ["servers_button"])
         if coords:
@@ -498,7 +468,6 @@ class DeviceWorker:
             self._log("servers_button not found on scrolled game page", "WARNING")
 
     def _handle_server_list(self, cfg: DeviceConfig, settings: Settings) -> None:
-        """Server list is open — tap the private server entry."""
         self._unknown_entered_at = None
         coords = self._resolve_tap_coords(cfg, ["private_server_entry"])
         if coords:
@@ -523,7 +492,6 @@ class DeviceWorker:
         self._set_last_action("Auto-farm double-click")
 
     def _do_auto_farm_tap(self, cfg: DeviceConfig, settings: Settings) -> None:
-        """Single tap to re-enable auto farm when it's detected as OFF."""
         coords = self._resolve_tap_coords(cfg, [states.AUTO_FARM_OFF])
         if coords is None:
             self._log("Auto-farm OFF: no assignment found for auto_farm_off", "WARNING")
@@ -544,7 +512,7 @@ class DeviceWorker:
     def _do_leave_tap(self, cfg: DeviceConfig) -> None:
         coords = self._resolve_tap_coords(cfg, [states.DISCONNECTED])
         if coords is None:
-            self._log("Leave: no image assigned for disconnected", "WARNING")
+            self._log("Leave: no tap offset assigned for disconnected detector", "WARNING")
             return
         tap(self._serial, coords[0], coords[1])
         self._set_last_action("Tapped Leave")
@@ -554,11 +522,6 @@ class DeviceWorker:
         cfg: DeviceConfig,
         detector_names: list[str],
     ) -> Optional[tuple[int, int]]:
-        """
-        Find tap coordinates by running template match for the first assigned
-        detector in detector_names that has a match on the current frame.
-        Returns (x, y) center of the match, or None if nothing matched.
-        """
         if self._last_frame is None:
             return None
         device_overrides = list(cfg.detector_assignments.keys())
@@ -592,24 +555,10 @@ class DeviceWorker:
         if self._lobby_entered_at is not None:
             self._lobby_entered_at = None
 
-    def _reset_disconnect_timer(self) -> None:
-        if self._disconnect_detected_at is not None:
-            self._disconnect_detected_at = None
-
     def _pause_auto_farm_timer(self) -> None:
-        """
-        Pause the auto-farm countdown by advancing the last-tap timestamp to now.
-        Effect: the countdown restarts from the full interval when back in IN_TANK.
-        Only the time spent in IN_TANK counts toward the interval.
-        """
         self._last_auto_farm_tap = time.monotonic()
 
     def _reset_end_run_timer(self) -> None:
-        """
-        Reset the end-run countdown to zero.
-        Called when the run has already ended naturally so firing end-run
-        would be redundant. Fresh countdown starts on return to IN_TANK.
-        """
         self._last_end_run_tap = time.monotonic()
 
     # ------------------------------------------------------------------
@@ -617,10 +566,6 @@ class DeviceWorker:
     # ------------------------------------------------------------------
 
     def _is_roblox_foreground(self) -> bool:
-        """
-        Check if Roblox is the active foreground app via ADB.
-        Defaults to True on error to avoid false recovery loops.
-        """
         try:
             from config.paths import adb_exe
             result = subprocess.run(
@@ -644,7 +589,6 @@ class DeviceWorker:
             return True
 
     def _is_roblox_running(self) -> bool:
-        """Check if Roblox process exists at all (running or backgrounded)."""
         try:
             from config.paths import adb_exe
             result = subprocess.run(

@@ -1,7 +1,6 @@
 {
   "double_click_delay_s": 0.15,
   "lobby_stuck_threshold_s": 60.0,
-  "disconnect_timeout_s": 60.0,
   "unknown_stuck_threshold_s": 60.0,
   "loop_interval_s": 5.0,
   "development_mode": false,
