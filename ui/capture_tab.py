@@ -35,7 +35,9 @@ from config.devices import DeviceConfig, load_devices, save_devices, DetectorAss
 from config.paths import project_root, adb_exe
 from config.constants import ADB_SCREENCAP_TIMEOUT_S, DETECTION_THRESHOLD
 
+# Core game states
 DETECTOR_NAMES = [
+    # Game states
     "disconnected",
     "crashed",
     "roblox_home",
@@ -46,7 +48,15 @@ DETECTOR_NAMES = [
     "net_reveal",
     "in_tank",
     "end_run_button",
-    "continue_dialog",
+    # Rejoin navigation — fast path
+    "24rolla_avatar",
+    "join_button",
+    # Rejoin navigation — hamburger fallback
+    "hamburger_menu",
+    "continue_playing_button",
+    "befish_game_icon",
+    "servers_button",
+    "private_server_entry",
 ]
 
 _DOT_DEVICE = "#16a34a"
@@ -88,7 +98,7 @@ class CaptureTab(ttk.Frame):
         ttk.Label(top, text="Detector:").pack(side="left", padx=(0, 6))
         detector_combo = ttk.Combobox(
             top, textvariable=self._selected_detector,
-            values=DETECTOR_NAMES, state="readonly", width=20)
+            values=DETECTOR_NAMES, state="readonly", width=24)
         detector_combo.pack(side="left", padx=(0, 12))
         detector_combo.bind("<<ComboboxSelected>>", lambda e: self._on_selection_change())
 
@@ -130,12 +140,12 @@ class CaptureTab(ttk.Frame):
         hdr = ttk.Frame(self, padding=(12, 0))
         hdr.pack(fill="x")
         ttk.Label(hdr, text=" ", width=2).pack(side="left")
-        ttk.Label(hdr, text="Detector", width=18, foreground="#6b7280",
+        ttk.Label(hdr, text="Detector", width=22, foreground="#6b7280",
                   font=("", 9)).pack(side="left")
         ttk.Label(hdr, text="Image", width=24, foreground="#6b7280",
                   font=("", 9)).pack(side="left")
-        ttk.Label(hdr, text="", width=8).pack(side="left")   # Test
-        ttk.Label(hdr, text="", width=8).pack(side="left")   # Assign
+        ttk.Label(hdr, text="", width=8).pack(side="left")
+        ttk.Label(hdr, text="", width=8).pack(side="left")
         ttk.Label(hdr, text="Score", width=7, foreground="#6b7280",
                   font=("", 9)).pack(side="left")
         ttk.Label(hdr, text="Assigned", width=22, foreground="#6b7280",
@@ -161,46 +171,37 @@ class CaptureTab(ttk.Frame):
             row = ttk.Frame(list_frame)
             row.pack(fill="x", pady=3)
 
-            # Status dot
             dot_canvas = tk.Canvas(row, width=12, height=12,
                                    highlightthickness=0, bg=_LEGEND_DOT_BG)
             dot_canvas.pack(side="left", padx=(0, 6))
             dot_id = dot_canvas.create_oval(2, 2, 10, 10, fill=_DOT_UNSET, outline="")
 
-            # Name
-            ttk.Label(row, text=name, width=18, anchor="w").pack(side="left")
+            ttk.Label(row, text=name, width=22, anchor="w").pack(side="left")
 
-            # Image dropdown — populated when device is selected
             img_var = tk.StringVar(value="—")
             img_combo = ttk.Combobox(row, textvariable=img_var,
                                      state="readonly", width=22)
             img_combo.pack(side="left", padx=(0, 4))
 
-            # Test button
             test_btn = ttk.Button(row, text="Test", width=5,
                 command=lambda n=name: self._test_detector(n))
             test_btn.pack(side="left", padx=(0, 2))
 
-            # Assign button
             assign_btn = ttk.Button(row, text="Assign", width=6,
                 command=lambda n=name: self._assign_detector(n))
             assign_btn.pack(side="left", padx=(0, 6))
 
-            # Score label
             score_lbl = ttk.Label(row, text="—", width=6,
                                    foreground="#9ca3af", font=("", 9))
             score_lbl.pack(side="left")
 
-            # Tap override note
             tap_lbl = ttk.Label(row, text="", font=("", 9), foreground="#6b7280")
             tap_lbl.pack(side="left", padx=(4, 0))
 
-            # Unassign button
             unassign_btn = ttk.Button(row, text="✕", width=2,
                 command=lambda n=name: self._unassign_detector(n))
             unassign_btn.pack(side="left", padx=(6, 0))
 
-            # Assigned filename — read-only display
             assigned_lbl = ttk.Label(row, text="not assigned",
                                      foreground="#9ca3af", font=("", 9), width=22)
             assigned_lbl.pack(side="left", padx=(6, 0))
@@ -212,7 +213,6 @@ class CaptureTab(ttk.Frame):
                 "score_lbl": score_lbl, "tap_lbl": tap_lbl,
                 "unassign_btn": unassign_btn, "assigned_lbl": assigned_lbl,
             }
-            # Bind dropdown change to clear score (score is per-selection)
             img_var.trace_add("write",
                 lambda *_, n=name: self._on_image_selection_change(n))
 
@@ -286,7 +286,6 @@ class CaptureTab(ttk.Frame):
     # ------------------------------------------------------------------
 
     def _list_available_images(self, detector_name: str) -> list[str]:
-        """Return filenames of all available images for a detector."""
         detector_dir = project_root() / "assets" / "detectors" / detector_name
         if not detector_dir.exists():
             return []
@@ -307,7 +306,6 @@ class CaptureTab(ttk.Frame):
             any_exists   = detector_dir.exists() and any(detector_dir.glob("*.png"))
             assignment   = cfg.detector_assignments.get(name) if cfg else None
 
-            # Dot color
             if device_path.exists():
                 dc.itemconfig(did, fill=_DOT_DEVICE)
             elif any_exists:
@@ -315,11 +313,9 @@ class CaptureTab(ttk.Frame):
             else:
                 dc.itemconfig(did, fill=_DOT_UNSET)
 
-            # Image dropdown
             available = self._list_available_images(name)
             img_combo["values"] = available if available else ["—"]
 
-            # Default to assigned image, then device image, then first available
             current_selection = "—"
             if assignment and assignment.image_filename and \
                assignment.image_filename in available:
@@ -329,10 +325,8 @@ class CaptureTab(ttk.Frame):
             elif available:
                 current_selection = available[0]
 
-            # Set without triggering trace
             img_var.set(current_selection)
 
-            # Score — from assignment if the assigned image matches current selection
             score = None
             if assignment and assignment.image_filename == current_selection:
                 score = assignment.last_score
@@ -343,14 +337,12 @@ class CaptureTab(ttk.Frame):
             else:
                 score_lbl.config(text="—", foreground="#9ca3af")
 
-            # Tap override
             if assignment and assignment.tap_offset_x is not None:
                 tap_lbl.config(
                     text=f"tap ({assignment.tap_offset_x},{assignment.tap_offset_y})")
             else:
                 tap_lbl.config(text="")
 
-            # Assigned filename display
             assigned_lbl = widgets.get("assigned_lbl")
             if assigned_lbl:
                 if assignment and assignment.image_filename:
@@ -361,7 +353,6 @@ class CaptureTab(ttk.Frame):
                     assigned_lbl.config(text="not assigned", foreground="#9ca3af")
 
     def _on_image_selection_change(self, detector_name: str) -> None:
-        """When dropdown changes, clear score — it's now unknown for this selection."""
         widgets = self._detector_rows.get(detector_name)
         if widgets:
             widgets["score_lbl"].config(text="—", foreground="#9ca3af")
@@ -371,7 +362,6 @@ class CaptureTab(ttk.Frame):
     # ------------------------------------------------------------------
 
     def _test_detector(self, detector_name: str) -> None:
-        """Capture a fresh frame and run template match against selected image."""
         serial = self._current_serial()
         if not serial:
             messagebox.showinfo("No device", "Select a device first.", parent=self)
@@ -392,13 +382,11 @@ class CaptureTab(ttk.Frame):
                 f"Image file not found:\n{image_path}", parent=self)
             return
 
-        # Disable test button while running
         widgets["test_btn"].config(state="disabled", text="…")
         widgets["score_lbl"].config(text="…", foreground="#9ca3af")
 
         def do_test():
             try:
-                # Fresh screencap
                 result = subprocess.run(
                     [adb_exe(), "-s", serial, "exec-out", "screencap", "-p"],
                     capture_output=True, timeout=ADB_SCREENCAP_TIMEOUT_S,
@@ -415,7 +403,6 @@ class CaptureTab(ttk.Frame):
                         detector_name, None, "Could not decode frame"))
                     return
 
-                # Load template and match
                 template = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
                 if template is None:
                     self.after(0, lambda: self._test_done(
@@ -462,7 +449,6 @@ class CaptureTab(ttk.Frame):
     # ------------------------------------------------------------------
 
     def _assign_detector(self, detector_name: str) -> None:
-        """Save the currently selected image as the assignment for this device."""
         serial = self._current_serial()
         if not serial:
             messagebox.showinfo("No device", "Select a device first.", parent=self)
@@ -475,7 +461,6 @@ class CaptureTab(ttk.Frame):
                 f"No image selected for '{detector_name}'.", parent=self)
             return
 
-        # Read current score from the score label
         score_text = widgets["score_lbl"].cget("text")
         try:
             score = float(score_text)
@@ -502,25 +487,19 @@ class CaptureTab(ttk.Frame):
         cfg.detector_assignments[detector_name] = new_assignment
         save_devices(devices)
 
-        # Invalidate template bank cache
         if self._manager:
             self._manager.invalidate_template(detector_name, serial)
 
-        # Update dot color
-        image_path = (project_root() / "assets" / "detectors" /
-                      detector_name / selected_image)
         own_image = f"{detector_name}_{serial}.png"
         if selected_image == own_image:
             widgets["dot_canvas"].itemconfig(widgets["dot_id"], fill=_DOT_DEVICE)
         else:
             widgets["dot_canvas"].itemconfig(widgets["dot_id"], fill=_DOT_OTHER)
 
-        # Update assigned label
         assigned_lbl = widgets.get("assigned_lbl")
         if assigned_lbl:
             assigned_lbl.config(text=selected_image, foreground="#16a34a")
 
-        # Update preview if this is the selected detector
         if self._selected_detector.get() == detector_name:
             cfg2 = self._get_devices().get(serial)
             self._update_preview(serial, detector_name, cfg2)
@@ -530,7 +509,6 @@ class CaptureTab(ttk.Frame):
     # ------------------------------------------------------------------
 
     def _unassign_detector(self, detector_name: str) -> None:
-        """Clear the image assignment for this detector on the current device."""
         serial = self._current_serial()
         if not serial:
             return
@@ -541,22 +519,18 @@ class CaptureTab(ttk.Frame):
             return
 
         if detector_name not in cfg.detector_assignments:
-            return  # nothing to unassign
+            return
 
-        # Remove assignment
         del cfg.detector_assignments[detector_name]
         save_devices(devices)
 
-        # Invalidate template cache
         if self._manager:
             self._manager.invalidate_template(detector_name, serial)
 
-        # Reset the row
         widgets = self._detector_rows[detector_name]
         widgets["score_lbl"].config(text="—", foreground="#9ca3af")
         widgets["tap_lbl"].config(text="")
 
-        # Refresh dot and dropdown
         root = project_root()
         device_path = root / "assets" / "detectors" / detector_name / f"{detector_name}_{serial}.png"
         detector_dir = root / "assets" / "detectors" / detector_name
@@ -573,12 +547,10 @@ class CaptureTab(ttk.Frame):
             widgets["dot_canvas"].itemconfig(widgets["dot_id"], fill=_DOT_UNSET)
             widgets["img_var"].set("—")
 
-        # Clear assigned label
         assigned_lbl = widgets.get("assigned_lbl")
         if assigned_lbl:
             assigned_lbl.config(text="not assigned", foreground="#9ca3af")
 
-        # Refresh preview
         cfg2 = self._get_devices().get(serial)
         if self._selected_detector.get() == detector_name:
             self._update_preview(serial, detector_name, cfg2)

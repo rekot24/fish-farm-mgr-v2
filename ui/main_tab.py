@@ -35,29 +35,32 @@ PANEL_MIN_H     = 60
 
 # State badge colors: (fg, bg)
 _STATE_COLORS: dict[str, tuple[str, str]] = {
-    "IN_TANK":               ("#166534", "#dcfce7"),
-    "LOBBY":                 ("#92400e", "#fef3c7"),
-    "CRASHED":               ("#991b1b", "#fee2e2"),
-    "DISCONNECTED":          ("#991b1b", "#fee2e2"),
-    "AUTO_FARM_OFF":         ("#92400e", "#fef3c7"),
-    "DEATH_SCREEN":          ("#374151", "#f3f4f6"),
-    "NET_REVEAL":            ("#374151", "#f3f4f6"),
-    "ROBLOX_HOME":           ("#374151", "#f3f4f6"),
-    "FRIEND_CARD":           ("#374151", "#f3f4f6"),
-    "HAMBURGER_MENU_OPEN":   ("#374151", "#f3f4f6"),
+    "IN_TANK":                 ("#166534", "#dcfce7"),
+    "LOBBY":                   ("#92400e", "#fef3c7"),
+    "CRASHED":                 ("#991b1b", "#fee2e2"),
+    "DISCONNECTED":            ("#991b1b", "#fee2e2"),
+    "AUTO_FARM_OFF":           ("#92400e", "#fef3c7"),
+    "DEATH_SCREEN":            ("#374151", "#f3f4f6"),
+    "NET_REVEAL":              ("#374151", "#f3f4f6"),
+    "ROBLOX_HOME":             ("#374151", "#f3f4f6"),
+    "FRIEND_CARD":             ("#374151", "#f3f4f6"),
+    "HAMBURGER_MENU_OPEN":     ("#374151", "#f3f4f6"),
     "CONTINUE_PLAYING_SCREEN": ("#374151", "#f3f4f6"),
-    "GAME_PAGE":             ("#374151", "#f3f4f6"),
-    "GAME_PAGE_SCROLLED":    ("#374151", "#f3f4f6"),
-    "SERVER_LIST":           ("#374151", "#f3f4f6"),
-    "UNKNOWN":               ("#374151", "#f3f4f6"),
-    "OFF":                   ("#9ca3af", "#f3f4f6"),
+    "GAME_PAGE":               ("#374151", "#f3f4f6"),
+    "GAME_PAGE_SCROLLED":      ("#374151", "#f3f4f6"),
+    "SERVER_LIST":             ("#374151", "#f3f4f6"),
+    "UNKNOWN":                 ("#374151", "#f3f4f6"),
+    "OFF":                     ("#9ca3af", "#f3f4f6"),
 }
 
-# Alert bar content per state: (text, fg, bg) — None means no alert
-_ALERT: dict[str, tuple[str, str, str] | None] = {
-    "CRASHED":      ("Recovering — launching Roblox",    "#991b1b", "#fee2e2"),
+# Alert bar content per state: (text, fg, bg)
+_ALERT: dict[str, tuple[str, str, str]] = {
+    "CRASHED":      ("Recovering — launching Roblox",      "#991b1b", "#fee2e2"),
     "DISCONNECTED": ("Disconnected — attempting reconnect", "#991b1b", "#fee2e2"),
 }
+
+_ALERT_EMPTY_FG = "#9ca3af"
+_ALERT_EMPTY_BG = "#f3f4f6"
 
 
 def _fmt_secs(s: float) -> str:
@@ -248,21 +251,6 @@ class MainTab(ttk.Frame):
 # ---------------------------------------------------------------------------
 
 class DeviceCard(ttk.Frame):
-    """
-    One card per device. Layout:
-      [name/model]                    [run-badge] [runtime]
-      ─────────────────────────────────────────────────────
-      [state badge 1/3] [alert text 2/3                  ]
-      [☑ Auto-farm] [timer]  [☑ End run]    [timer]
-      [☑ Stay awake][timer]  [☑ Lobby guard][timer]
-      ─────────────────────────────────────────────────────
-      [Start/Stop]  [End run]  [Settings]
-
-    Timer strategy: local countdown vars tick every second via after().
-    resync() is called by MainTab.refresh() on each worker poll to correct
-    drift. Only the formatted string is compared before updating labels —
-    no full rebuild happens unless state changes.
-    """
 
     def __init__(self, parent, serial, manager, get_devices, save_devices_fn):
         super().__init__(parent, relief="solid", borderwidth=1, padding=10)
@@ -271,16 +259,14 @@ class DeviceCard(ttk.Frame):
         self._get_devices = get_devices
         self._save_devices = save_devices_fn
 
-        # Local countdown state (seconds remaining)
-        self._af_secs: float = 0.0
-        self._er_secs: float = 0.0
-        self._sa_secs: float = 0.0
-        self._lobby_secs: float = 0.0   # elapsed (counts up)
-        self._is_running: bool = False
+        self._af_secs: float    = 0.0
+        self._er_secs: float    = 0.0
+        self._sa_secs: float    = 0.0
+        self._lobby_secs: float = 0.0
+        self._is_running: bool  = False
         self._current_state: str = ""
         self._tick_job = None
 
-        # Toggle vars
         self._auto_farm_var   = tk.BooleanVar()
         self._end_run_var     = tk.BooleanVar()
         self._stay_awake_var  = tk.BooleanVar()
@@ -297,10 +283,6 @@ class DeviceCard(ttk.Frame):
 
         self._build()
         self._start_tick()
-
-    # ------------------------------------------------------------------
-    # Build
-    # ------------------------------------------------------------------
 
     def _build(self) -> None:
         # ---- Header ----
@@ -324,17 +306,17 @@ class DeviceCard(ttk.Frame):
 
         ttk.Separator(self, orient="horizontal").pack(fill="x", pady=(8, 6))
 
-        # ---- Status + alert row ----
+        # ---- Status + alert row — use tk.Frame so bg is settable ----
         sa_row = tk.Frame(self)
         sa_row.pack(fill="x", pady=(0, 6))
         self._state_badge = tk.Label(
-            sa_row, font=("", 9, "bold"), padx=6, pady=3, relief="flat",
-            anchor="center", width=14,
+            sa_row, font=("", 9, "bold"), padx=6, pady=3,
+            relief="flat", anchor="center", width=14,
         )
         self._state_badge.pack(side="left")
         self._alert_label = tk.Label(
             sa_row, font=("", 9), padx=6, pady=3, relief="flat",
-            anchor="w",
+            anchor="w", text="", fg=_ALERT_EMPTY_FG, bg=_ALERT_EMPTY_BG,
         )
         self._alert_label.pack(side="left", fill="x", expand=True)
 
@@ -344,25 +326,23 @@ class DeviceCard(ttk.Frame):
         tg.columnconfigure(0, weight=1)
         tg.columnconfigure(2, weight=1)
 
-        # Row 0: Auto-farm | timer | End run | timer
-        af_cb = ttk.Checkbutton(tg, text="Auto-farm", variable=self._auto_farm_var)
-        af_cb.grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Checkbutton(tg, text="Auto-farm", variable=self._auto_farm_var).grid(
+            row=0, column=0, sticky="w", pady=2)
         self._af_lbl = ttk.Label(tg, font=("", 9, "bold"), width=7, anchor="e")
         self._af_lbl.grid(row=0, column=1, sticky="e", padx=(0, 10), pady=2)
 
-        er_cb = ttk.Checkbutton(tg, text="End run", variable=self._end_run_var)
-        er_cb.grid(row=0, column=2, sticky="w", pady=2)
+        ttk.Checkbutton(tg, text="End run", variable=self._end_run_var).grid(
+            row=0, column=2, sticky="w", pady=2)
         self._er_lbl = ttk.Label(tg, font=("", 9, "bold"), width=7, anchor="e")
         self._er_lbl.grid(row=0, column=3, sticky="e", pady=2)
 
-        # Row 1: Stay awake | timer | Lobby guard | timer
-        sa_cb = ttk.Checkbutton(tg, text="Stay awake", variable=self._stay_awake_var)
-        sa_cb.grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Checkbutton(tg, text="Stay awake", variable=self._stay_awake_var).grid(
+            row=1, column=0, sticky="w", pady=2)
         self._sa_lbl = ttk.Label(tg, font=("", 9, "bold"), width=7, anchor="e")
         self._sa_lbl.grid(row=1, column=1, sticky="e", padx=(0, 10), pady=2)
 
-        lg_cb = ttk.Checkbutton(tg, text="Lobby guard", variable=self._lobby_guard_var)
-        lg_cb.grid(row=1, column=2, sticky="w", pady=2)
+        ttk.Checkbutton(tg, text="Lobby guard", variable=self._lobby_guard_var).grid(
+            row=1, column=2, sticky="w", pady=2)
         self._lg_lbl = ttk.Label(tg, font=("", 9, "bold"), width=7, anchor="e")
         self._lg_lbl.grid(row=1, column=3, sticky="e", pady=2)
 
@@ -383,7 +363,7 @@ class DeviceCard(ttk.Frame):
             row=0, column=2, sticky="ew", padx=(3, 0))
 
     # ------------------------------------------------------------------
-    # Tick — runs every second, independent of worker poll
+    # Tick
     # ------------------------------------------------------------------
 
     def _start_tick(self) -> None:
@@ -403,8 +383,7 @@ class DeviceCard(ttk.Frame):
         self._tick_job = self.after(1000, self._tick)
 
     def _refresh_timer_labels(self) -> None:
-        """Update only the timer label text — no widget rebuild."""
-        state = self._current_state
+        state   = self._current_state
         running = self._is_running
 
         cfg = self._get_devices().get(self._serial)
@@ -425,40 +404,33 @@ class DeviceCard(ttk.Frame):
 
         if state in ("IN_TANK", "AUTO_FARM_OFF"):
             _set(self._af_lbl, _fmt_secs(self._af_secs), NORMAL)
-            er_color = WARN if self._er_secs < 60 else NORMAL
-            _set(self._er_lbl, _fmt_secs(self._er_secs), er_color)
-            if sa_enabled:
-                _set(self._sa_lbl, _fmt_secs(self._sa_secs), NORMAL)
-            else:
-                _set(self._sa_lbl, "—", MUTED)
+            _set(self._er_lbl, _fmt_secs(self._er_secs),
+                 WARN if self._er_secs < 60 else NORMAL)
+            _set(self._sa_lbl,
+                 _fmt_secs(self._sa_secs) if sa_enabled else "—",
+                 NORMAL if sa_enabled else MUTED)
             _set(self._lg_lbl, "—", MUTED)
 
         elif state == "LOBBY":
             _set(self._af_lbl, "—", MUTED)
             _set(self._er_lbl, "—", MUTED)
-            if sa_enabled:
-                _set(self._sa_lbl, _fmt_secs(self._sa_secs), NORMAL)
-            else:
-                _set(self._sa_lbl, "—", MUTED)
+            _set(self._sa_lbl,
+                 _fmt_secs(self._sa_secs) if sa_enabled else "—",
+                 NORMAL if sa_enabled else MUTED)
             if lg_enabled:
-                lg_color = WARN if self._lobby_secs > 30 else NORMAL
-                _set(self._lg_lbl, _fmt_secs(self._lobby_secs), lg_color)
-                # Also update alert text live
+                _set(self._lg_lbl, _fmt_secs(self._lobby_secs),
+                     WARN if self._lobby_secs > 30 else NORMAL)
                 self._alert_label.config(
-                    text=f"In lobby for {_fmt_secs(self._lobby_secs)}")
+                    text=f"In lobby for {_fmt_secs(self._lobby_secs)}",
+                    fg="#92400e", bg="#fef3c7")
             else:
                 _set(self._lg_lbl, "—", MUTED)
 
     # ------------------------------------------------------------------
-    # resync — called by MainTab.refresh() on each worker poll
+    # resync
     # ------------------------------------------------------------------
 
     def resync(self, status: dict) -> None:
-        """
-        Accept fresh status from the worker. Update static fields always.
-        Resync countdown values so drift doesn't accumulate.
-        Only rebuild static structure if state changed.
-        """
         cfg = self._get_devices().get(self._serial)
         name  = cfg.nickname if cfg and cfg.nickname else self._serial[:8]
         model = cfg.model    if cfg and cfg.model    else self._serial
@@ -469,38 +441,32 @@ class DeviceCard(ttk.Frame):
         state   = status.get("state", "UNKNOWN")
         runtime = status.get("runtime_s", 0.0)
 
-        # Run badge
         if running:
-            self._run_badge.config(
-                text="● Running", fg="#166534", bg="#dcfce7")
+            self._run_badge.config(text="● Running", fg="#166534", bg="#dcfce7")
             self._runtime_label.config(text=_fmt_runtime(runtime))
             self._start_stop_btn.config(text="Stop")
         else:
-            self._run_badge.config(
-                text="● Stopped", fg="#991b1b", bg="#fee2e2")
+            self._run_badge.config(text="● Stopped", fg="#991b1b", bg="#fee2e2")
             self._runtime_label.config(text="")
             self._start_stop_btn.config(text="Start")
 
         self._is_running = running
 
-        # State badge
         display_state = state if running else "OFF"
         fg, bg = _STATE_COLORS.get(display_state, ("#374151", "#f3f4f6"))
         self._state_badge.config(text=display_state, fg=fg, bg=bg)
 
-        # Alert label
         alert = _ALERT.get(state) if running else None
         if state == "LOBBY" and running:
-            # Text is kept live by _tick; set colors here
-            self._alert_label.config(
-                fg="#92400e", bg="#fef3c7",
-                text=f"In lobby for {_fmt_secs(self._lobby_secs)}")
+            # Text kept live by _tick; just set colors
+            self._alert_label.config(fg="#92400e", bg="#fef3c7")
         elif alert:
-            self._alert_label.config(text=alert[0], fg=alert[1], bg=alert[2])
+            self._alert_label.config(
+                text=alert[0], fg=alert[1], bg=alert[2])
         else:
-            self._alert_label.config(text="", fg="#6b7280", bg=self.cget("background"))
+            self._alert_label.config(
+                text="", fg=_ALERT_EMPTY_FG, bg=_ALERT_EMPTY_BG)
 
-        # Resync countdown values
         if running:
             self._af_secs    = status.get("auto_farm_countdown_s",  self._af_secs)
             self._er_secs    = status.get("end_run_countdown_s",     self._er_secs)
@@ -512,7 +478,6 @@ class DeviceCard(ttk.Frame):
         self._current_state = state
         self._refresh_timer_labels()
 
-        # Toggle checkboxes — suppress trace while setting to avoid write-back
         if cfg:
             self._suppress_toggle = True
             self._auto_farm_var.set(cfg.auto_farm_enabled)
