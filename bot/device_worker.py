@@ -61,6 +61,7 @@ from bot.actions import (
     tap,
 )
 from capture.base import CaptureBackend
+from config import settings
 from config.constants import DETECTION_THRESHOLD
 from config.devices import DeviceConfig, load_devices, save_devices
 from config.settings import Settings
@@ -71,6 +72,7 @@ _DEVICE_NOT_FOUND = "device_not_found"
 
 _DETECTOR_PRIORITY = [
     states.DISCONNECTED,
+    states.JOIN_BUTTON,
     states.ROBLOX_HOME,
     states.FRIEND_CARD,
     states.HAMBURGER_MENU_OPEN,
@@ -375,6 +377,8 @@ class DeviceWorker:
             self._handle_disconnected(cfg, settings)
         elif state == states.CRASHED:
             self._handle_crashed(cfg, settings)
+        elif state == states.JOIN_BUTTON:
+            self._handle_join_button(cfg, settings)
         elif state == states.ROBLOX_HOME:
             self._handle_roblox_home(cfg, settings)
         elif state == states.FRIEND_CARD:
@@ -505,6 +509,16 @@ class DeviceWorker:
             self._set_last_action("Tapped Join (friend card)")
         else:
             self._log("join_button not found on friend card", "WARNING")
+
+    def _handle_join_button(self, cfg: DeviceConfig, settings: Settings) -> None:
+        self._unknown_entered_at = None
+        coords = self._resolve_tap_coords(cfg, ["join_button"])
+        if coords:
+            self._log("Join button visible — tapping Join", "INFO")
+            tap(self._serial, coords[0], coords[1])
+            self._set_last_action("Tapped Join button")
+        else:
+            self._log("join_button coords not resolved", "WARNING")
 
     def _handle_hamburger_menu_open(self, cfg: DeviceConfig, settings: Settings) -> None:
         self._unknown_entered_at = None

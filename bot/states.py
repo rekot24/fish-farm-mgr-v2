@@ -25,6 +25,7 @@ UNKNOWN                  = "UNKNOWN"
 
 # --- Rejoin navigation states ---
 FRIEND_CARD              = "FRIEND_CARD"
+JOIN_BUTTON              = "JOIN_BUTTON"
 HAMBURGER_MENU_OPEN      = "HAMBURGER_MENU_OPEN"
 CONTINUE_PLAYING_SCREEN  = "CONTINUE_PLAYING_SCREEN"
 GAME_PAGE                = "GAME_PAGE"
