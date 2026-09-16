@@ -32,16 +32,23 @@ Rejoin navigation is fully state-driven — no Chrome URL, no hardcoded sleeps.
 Each detected state triggers one action that advances to the next state.
 
 Fast-path rejoin (when 24rolla is visible on home screen):
-  ROBLOX_HOME → tap 24rolla_avatar → JOIN_BUTTON detected → tap Join → IN_TANK
+  ROBLOX_HOME → tap 24rolla_avatar (tap target) → JOIN_BUTTON detected → tap Join → IN_TANK
 
 Fallback rejoin (hamburger menu route):
-  ROBLOX_HOME → tap hamburger_menu → HAMBURGER_MENU_OPEN
+  ROBLOX_HOME → tap hamburger_menu (tap target) → HAMBURGER_MENU_OPEN detected
   → tap continue_playing_button → CONTINUE_PLAYING_SCREEN
   → tap befish_game_icon → GAME_PAGE → swipe_down_full → GAME_PAGE_SCROLLED
   → tap servers_button → SERVER_LIST → tap private_server_entry → IN_TANK
 
-CRASHED state: launches Roblox if not running, then falls into ROBLOX_HOME.
+CRASHED state: determined by ADB process check, not image detection.
+  Launches Roblox if not running, then falls into ROBLOX_HOME.
 DISCONNECTED state: fires immediately — taps Leave via tap offset. No timer.
+
+Tap-target-only detectors (referenced as plain strings in handlers, never
+as states in _DETECTOR_PRIORITY):
+  "24rolla_avatar", "hamburger_menu" (in _handle_roblox_home),
+  "continue_playing_button", "befish_game_icon", "servers_button",
+  "private_server_entry", "end_run_button", "auto_farm_on"
 """
 
 from __future__ import annotations
@@ -200,9 +207,6 @@ class DeviceWorker:
 
                 frame = self._capture.get_frame()
                 if frame is None:
-                    # If the capture backend itself is disconnected (scrcpy
-                    # reconnect exhausted), treat as a failure directly —
-                    # no point running ADB foreground checks if the stream is dead.
                     if not self._capture.is_connected:
                         self._log(
                             "Capture backend disconnected — "
@@ -212,8 +216,6 @@ class DeviceWorker:
                         time.sleep(settings.loop_interval_s)
                         continue
 
-                    # Backend thinks it's connected but no frame yet —
-                    # check if Roblox is actually running.
                     self._log(
                         "Frame capture returned None — checking if Roblox is running",
                         "WARNING")
@@ -248,7 +250,6 @@ class DeviceWorker:
                     time.sleep(settings.loop_interval_s)
                     continue
 
-                # Frame received — backend is alive, reset failure counter
                 self._consecutive_adb_failures = 0
                 self._last_frame = frame
                 detected_state = self._resolve_state(frame, cfg, settings)
@@ -290,8 +291,6 @@ class DeviceWorker:
     # ------------------------------------------------------------------
 
     def _resolve_state(self, frame, cfg: DeviceConfig, settings: Settings) -> str:
-        # Pass the full detector_assignments dict so the bank can look up
-        # which image file is assigned to each detector for this device.
         detector_assignments = cfg.detector_assignments
 
         for detector_name in _DETECTOR_PRIORITY:
@@ -481,13 +480,15 @@ class DeviceWorker:
         self._reset_lobby_timer()
         self._pause_auto_farm_timer()
         self._reset_end_run_timer()
+        # "24rolla_avatar" and "hamburger_menu" are tap targets, not states —
+        # referenced as plain strings here, same as all other tap-target-only detectors.
         coords = self._resolve_tap_coords(cfg, ["24rolla_avatar"])
         if coords:
             self._log("24rolla visible on home screen — tapping avatar (fast path)", "INFO")
             tap(self._serial, coords[0], coords[1])
             self._set_last_action("Tapped 24rolla avatar (fast path)")
             return
-        coords = self._resolve_tap_coords(cfg, [states.HAMBURGER_MENU_OPEN])
+        coords = self._resolve_tap_coords(cfg, ["hamburger_menu"])
         if coords:
             self._log("24rolla not visible — tapping hamburger menu (fallback path)", "INFO")
             tap(self._serial, coords[0], coords[1])

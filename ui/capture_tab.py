@@ -38,8 +38,10 @@ from config.constants import ADB_SCREENCAP_TIMEOUT_S, DETECTION_THRESHOLD
 
 DETECTOR_NAMES = [
     # Game states
+    # Note: "crashed" is intentionally absent — CRASHED state is determined by
+    # ADB process check (is Roblox running?), not by image detection. There is
+    # no screen to crop for it.
     "disconnected",
-    "crashed",
     "roblox_home",
     "lobby",
     "auto_farm_on",
