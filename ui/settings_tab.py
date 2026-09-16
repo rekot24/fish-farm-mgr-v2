@@ -1,23 +1,7 @@
 """
 ui/settings_tab.py
 
-Settings tab with two independent logging sections:
-
-  Logging (Stream 1 — log data to file)
-    Log to file toggle — independent of dev mode entirely
-    Log file path display
-    Log level dropdown (DEBUG / INFO / WARNING / ERROR / CRITICAL)
-    When off: sub-options grey, note shown
-
-  Debug (Stream 2 — debug panel)
-    Development mode — master switch (shows/hides panel)
-    Show logs in debug panel — routes Stream 1 to panel
-    Debug logging — routes Stream 2 to panel
-      Log state changes / detections / actions / config reads
-        (grey when debug logging off)
-    Auto-disable: dev mode turns off when BOTH show_logs and debug_logging are off
-
-Log to file has no relationship to dev mode.
+Settings tab — Timing, Recovery, Logging, Debug sections.
 """
 
 from __future__ import annotations
@@ -135,6 +119,14 @@ class SettingsTab(ttk.Frame):
         self._loop_var,          _ = str_field("Loop interval (s)",
             "How often each device captures and checks state")
 
+        # ---- Recovery ----
+        section("Recovery")
+        self._adb_fail_var, _ = str_field(
+            "ADB failure threshold",
+            "Consecutive 'device not found' failures before worker stops.\n"
+            "Must be consecutive — any successful contact resets the count.",
+        )
+
         # ---- Logging (Stream 1 — file) ----
         section("Logging")
         self._log_to_file_var, self._log_to_file_cb = bool_field(
@@ -221,6 +213,7 @@ class SettingsTab(ttk.Frame):
         self._lobby_stuck_var.set(str(s.lobby_stuck_threshold_s))
         self._unknown_stuck_var.set(str(s.unknown_stuck_threshold_s))
         self._loop_var.set(str(s.loop_interval_s))
+        self._adb_fail_var.set(str(s.adb_failure_threshold))
 
         self._log_to_file_var.set(s.logging.log_to_file)
         self._log_path_var.set(str(s.log_file_path()))
@@ -242,6 +235,10 @@ class SettingsTab(ttk.Frame):
             try: return float(var.get())
             except ValueError: return default
 
+        def _int(var, default):
+            try: return max(1, int(var.get()))
+            except ValueError: return default
+
         s = self._get_settings()
 
         dev_mode = self._dev_mode_var.get()
@@ -257,6 +254,7 @@ class SettingsTab(ttk.Frame):
             lobby_stuck_threshold_s=_float(self._lobby_stuck_var, s.lobby_stuck_threshold_s),
             unknown_stuck_threshold_s=_float(self._unknown_stuck_var, s.unknown_stuck_threshold_s),
             loop_interval_s=_float(self._loop_var, s.loop_interval_s),
+            adb_failure_threshold=_int(self._adb_fail_var, s.adb_failure_threshold),
             development_mode=dev_mode,
             logging=replace(
                 s.logging,

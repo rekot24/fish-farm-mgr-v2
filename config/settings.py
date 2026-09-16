@@ -56,14 +56,15 @@ class DebugConfig:
 class Settings:
     """All global app settings."""
 
-    double_click_delay_s: float = DOUBLE_CLICK_DELAY_S
-    lobby_stuck_threshold_s: float = LOBBY_STUCK_THRESHOLD_S
+    double_click_delay_s: float     = DOUBLE_CLICK_DELAY_S
+    lobby_stuck_threshold_s: float  = LOBBY_STUCK_THRESHOLD_S
     unknown_stuck_threshold_s: float = 60.0
-    loop_interval_s: float = LOOP_INTERVAL_S
-    development_mode: bool = False   # master switch for the debug panel
+    loop_interval_s: float          = LOOP_INTERVAL_S
+    adb_failure_threshold: int      = 3   # consecutive "device not found" before worker stops
+    development_mode: bool          = False
 
     logging: LoggingConfig = field(default_factory=LoggingConfig)
-    debug: DebugConfig = field(default_factory=DebugConfig)
+    debug: DebugConfig     = field(default_factory=DebugConfig)
 
     def log_file_path(self) -> Path:
         return project_root() / "logs" / "app.log"
@@ -89,7 +90,6 @@ def load_settings() -> Settings:
         defaults = asdict(Settings())
         merged = _deep_merge(defaults, raw)
 
-        # Strip legacy/stale keys from logging
         logging_raw = merged.pop("logging", {})
         for old in ("enabled", "log_to_console", "log_debug_messages"):
             logging_raw.pop(old, None)
@@ -98,7 +98,6 @@ def load_settings() -> Settings:
             if k in LoggingConfig.__dataclass_fields__
         })
 
-        # Strip legacy/stale keys from debug
         debug_raw = merged.pop("debug", {})
         for old in ("enabled", "log_debug_messages"):
             debug_raw.pop(old, None)

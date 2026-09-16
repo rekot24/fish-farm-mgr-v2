@@ -3,6 +3,7 @@
   "lobby_stuck_threshold_s": 60.0,
   "unknown_stuck_threshold_s": 60.0,
   "loop_interval_s": 5.0,
+  "adb_failure_threshold": 3,
   "development_mode": false,
   "logging": {
     "log_to_file": true,

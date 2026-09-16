@@ -10,6 +10,12 @@ Card layout (top to bottom):
   - Toggle grid: 4 columns — [cb label] [timer] [cb label] [timer]
   - Button row: Start/Stop | End run | Settings
 
+Non-blocking start/stop:
+  DeviceCard._toggle_worker() dispatches start_device / stop_device to a
+  background thread and immediately updates the alert label to "Starting…"
+  or "Stopping…". The next poll cycle picks up the real state and clears it.
+  The app never freezes waiting for scrcpy to connect or the worker to join.
+
 Timer smoothness:
   Each card maintains local countdown variables that tick every second via
   Tkinter after(). The worker poll (every loop_interval_s) resyncs the
@@ -19,6 +25,7 @@ Timer smoothness:
 
 from __future__ import annotations
 
+import threading
 import tkinter as tk
 from tkinter import ttk
 from typing import Callable
@@ -28,12 +35,10 @@ from bot.device_manager import DeviceManager
 from config.devices import DeviceConfig
 from config.settings import Settings
 
-# Layout constants
 CARD_COLUMNS    = 2
 PANEL_DEFAULT_H = 150
 PANEL_MIN_H     = 60
 
-# State badge colors: (fg, bg)
 _STATE_COLORS: dict[str, tuple[str, str]] = {
     "IN_TANK":                 ("#166534", "#dcfce7"),
     "LOBBY":                   ("#92400e", "#fef3c7"),
@@ -53,7 +58,6 @@ _STATE_COLORS: dict[str, tuple[str, str]] = {
     "OFF":                     ("#9ca3af", "#f3f4f6"),
 }
 
-# Alert bar content per state: (text, fg, bg)
 _ALERT: dict[str, tuple[str, str, str]] = {
     "CRASHED":      ("Recovering — launching Roblox",      "#991b1b", "#fee2e2"),
     "DISCONNECTED": ("Disconnected — attempting reconnect", "#991b1b", "#fee2e2"),
@@ -61,6 +65,8 @@ _ALERT: dict[str, tuple[str, str, str]] = {
 
 _ALERT_EMPTY_FG = "#9ca3af"
 _ALERT_EMPTY_BG = "#f3f4f6"
+_ALERT_PENDING_FG = "#1d4ed8"
+_ALERT_PENDING_BG = "#dbeafe"
 
 
 def _fmt_secs(s: float) -> str:
@@ -72,12 +78,12 @@ def _fmt_secs(s: float) -> str:
 def _fmt_runtime(s: float) -> str:
     s = max(0.0, s)
     h, rem = divmod(int(s), 3600)
-    m, sec = divmod(rem, 60)
+    m, _ = divmod(rem, 60)
     if h:
         return f"{h}h {m}m"
     if m:
         return f"{m}m"
-    return f"{sec}s"
+    return f"{int(s)}s"
 
 
 class MainTab(ttk.Frame):
@@ -118,20 +124,28 @@ class MainTab(ttk.Frame):
         toolbar.pack(fill="x", padx=12, pady=(10, 6))
         self._status_label = ttk.Label(toolbar, text="No devices")
         self._status_label.pack(side="left")
-        ttk.Button(toolbar, text="Stop all", command=self._stop_all).pack(side="right", padx=(4, 0))
-        ttk.Button(toolbar, text="Start all", command=self._start_all).pack(side="right")
+        ttk.Button(toolbar, text="Stop all",
+                   command=self._stop_all).pack(side="right", padx=(4, 0))
+        ttk.Button(toolbar, text="Start all",
+                   command=self._start_all).pack(side="right")
 
         canvas_container = ttk.Frame(card_outer)
         canvas_container.pack(fill="both", expand=True)
         canvas = tk.Canvas(canvas_container, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(canvas_container, orient="vertical", command=canvas.yview)
+        scrollbar = ttk.Scrollbar(
+            canvas_container, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
         self._card_frame = ttk.Frame(canvas)
-        self._canvas_window = canvas.create_window((0, 0), window=self._card_frame, anchor="nw")
-        self._card_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda e: canvas.itemconfig(self._canvas_window, width=e.width))
+        self._canvas_window = canvas.create_window(
+            (0, 0), window=self._card_frame, anchor="nw")
+        self._card_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind(
+            "<Configure>",
+            lambda e: canvas.itemconfig(self._canvas_window, width=e.width))
         from ui.scroll_utils import bind_mousewheel
         bind_mousewheel(canvas)
         self._canvas = canvas
@@ -153,8 +167,9 @@ class MainTab(ttk.Frame):
         )
         self._log_text.pack(fill="both", expand=True, padx=4, pady=(0, 4))
 
-        h_scroll = ttk.Scrollbar(self._panel_frame, orient="horizontal",
-                                  command=self._log_text.xview)
+        h_scroll = ttk.Scrollbar(
+            self._panel_frame, orient="horizontal",
+            command=self._log_text.xview)
         h_scroll.pack(fill="x", padx=4)
         self._log_text.configure(xscrollcommand=h_scroll.set)
 
@@ -166,7 +181,7 @@ class MainTab(ttk.Frame):
                                      font=("Courier", 9, "bold"))
 
     # ------------------------------------------------------------------
-    # Panel callback
+    # Panel
     # ------------------------------------------------------------------
 
     def append_log(self, msg: str, level: str) -> None:
@@ -203,13 +218,19 @@ class MainTab(ttk.Frame):
     # ------------------------------------------------------------------
 
     def _start_all(self) -> None:
-        self._manager.start_all()
+        threading.Thread(
+            target=self._manager.start_all, daemon=True).start()
+        for card in self._cards.values():
+            card.set_pending("Starting…")
 
     def _stop_all(self) -> None:
-        self._manager.stop_all()
+        threading.Thread(
+            target=self._manager.stop_all, daemon=True).start()
+        for card in self._cards.values():
+            card.set_pending("Stopping…")
 
     # ------------------------------------------------------------------
-    # Refresh (called by App poll loop)
+    # Refresh
     # ------------------------------------------------------------------
 
     def refresh(self) -> None:
@@ -219,7 +240,8 @@ class MainTab(ttk.Frame):
         running = sum(1 for s in all_status if s.get("running"))
         total = len(all_status)
         self._status_label.config(
-            text=f"{running} of {total} devices running" if total else "No devices"
+            text=f"{running} of {total} devices running" if total
+            else "No devices"
         )
 
         for status in all_status:
@@ -251,6 +273,16 @@ class MainTab(ttk.Frame):
 # ---------------------------------------------------------------------------
 
 class DeviceCard(ttk.Frame):
+    """
+    One card per device.
+
+    Pending state:
+      When Start/Stop is tapped, _pending is set to "Starting…" or
+      "Stopping…" and shown in the alert label immediately. resync()
+      clears _pending as soon as the worker's running state changes to
+      match the expected outcome. This gives instant UI feedback with
+      zero app freeze.
+    """
 
     def __init__(self, parent, serial, manager, get_devices, save_devices_fn):
         super().__init__(parent, relief="solid", borderwidth=1, padding=10)
@@ -265,6 +297,7 @@ class DeviceCard(ttk.Frame):
         self._lobby_secs: float = 0.0
         self._is_running: bool  = False
         self._current_state: str = ""
+        self._pending: str = ""   # "Starting…" | "Stopping…" | ""
         self._tick_job = None
 
         self._auto_farm_var   = tk.BooleanVar()
@@ -279,13 +312,17 @@ class DeviceCard(ttk.Frame):
             (self._stay_awake_var,  "stay_awake_enabled"),
             (self._lobby_guard_var, "stuck_lobby_detection_enabled"),
         ]:
-            var.trace_add("write", lambda *_, a=attr, v=var: self._on_toggle(a, v))
+            var.trace_add("write",
+                          lambda *_, a=attr, v=var: self._on_toggle(a, v))
 
         self._build()
         self._start_tick()
 
+    # ------------------------------------------------------------------
+    # Build
+    # ------------------------------------------------------------------
+
     def _build(self) -> None:
-        # ---- Header ----
         header = ttk.Frame(self)
         header.pack(fill="x")
 
@@ -306,7 +343,7 @@ class DeviceCard(ttk.Frame):
 
         ttk.Separator(self, orient="horizontal").pack(fill="x", pady=(8, 6))
 
-        # ---- Status + alert row — use tk.Frame so bg is settable ----
+        # Status + alert row
         sa_row = tk.Frame(self)
         sa_row.pack(fill="x", pady=(0, 6))
         self._state_badge = tk.Label(
@@ -320,35 +357,38 @@ class DeviceCard(ttk.Frame):
         )
         self._alert_label.pack(side="left", fill="x", expand=True)
 
-        # ---- Toggle + timer grid ----
+        # Toggle + timer grid
         tg = ttk.Frame(self)
         tg.pack(fill="x", pady=(0, 4))
         tg.columnconfigure(0, weight=1)
         tg.columnconfigure(2, weight=1)
 
-        ttk.Checkbutton(tg, text="Auto-farm", variable=self._auto_farm_var).grid(
+        ttk.Checkbutton(tg, text="Auto-farm",
+                        variable=self._auto_farm_var).grid(
             row=0, column=0, sticky="w", pady=2)
         self._af_lbl = ttk.Label(tg, font=("", 9, "bold"), width=7, anchor="e")
         self._af_lbl.grid(row=0, column=1, sticky="e", padx=(0, 10), pady=2)
 
-        ttk.Checkbutton(tg, text="End run", variable=self._end_run_var).grid(
+        ttk.Checkbutton(tg, text="End run",
+                        variable=self._end_run_var).grid(
             row=0, column=2, sticky="w", pady=2)
         self._er_lbl = ttk.Label(tg, font=("", 9, "bold"), width=7, anchor="e")
         self._er_lbl.grid(row=0, column=3, sticky="e", pady=2)
 
-        ttk.Checkbutton(tg, text="Stay awake", variable=self._stay_awake_var).grid(
+        ttk.Checkbutton(tg, text="Stay awake",
+                        variable=self._stay_awake_var).grid(
             row=1, column=0, sticky="w", pady=2)
         self._sa_lbl = ttk.Label(tg, font=("", 9, "bold"), width=7, anchor="e")
         self._sa_lbl.grid(row=1, column=1, sticky="e", padx=(0, 10), pady=2)
 
-        ttk.Checkbutton(tg, text="Lobby guard", variable=self._lobby_guard_var).grid(
+        ttk.Checkbutton(tg, text="Lobby guard",
+                        variable=self._lobby_guard_var).grid(
             row=1, column=2, sticky="w", pady=2)
         self._lg_lbl = ttk.Label(tg, font=("", 9, "bold"), width=7, anchor="e")
         self._lg_lbl.grid(row=1, column=3, sticky="e", pady=2)
 
         ttk.Separator(self, orient="horizontal").pack(fill="x", pady=6)
 
-        # ---- Button row ----
         btn_row = ttk.Frame(self)
         btn_row.pack(fill="x")
         btn_row.columnconfigure(0, weight=1)
@@ -357,10 +397,27 @@ class DeviceCard(ttk.Frame):
         self._start_stop_btn = ttk.Button(
             btn_row, text="Start", command=self._toggle_worker)
         self._start_stop_btn.grid(row=0, column=0, sticky="ew", padx=(0, 3))
-        ttk.Button(btn_row, text="End run", command=self._fire_end_run).grid(
+        ttk.Button(btn_row, text="End run",
+                   command=self._fire_end_run).grid(
             row=0, column=1, sticky="ew", padx=3)
-        ttk.Button(btn_row, text="Settings", command=self._open_settings).grid(
+        ttk.Button(btn_row, text="Settings",
+                   command=self._open_settings).grid(
             row=0, column=2, sticky="ew", padx=(3, 0))
+
+    # ------------------------------------------------------------------
+    # Pending state
+    # ------------------------------------------------------------------
+
+    def set_pending(self, msg: str) -> None:
+        """Show a transient message in the alert label (Starting… / Stopping…)."""
+        self._pending = msg
+        self._alert_label.config(
+            text=msg, fg=_ALERT_PENDING_FG, bg=_ALERT_PENDING_BG)
+        self._start_stop_btn.config(state="disabled")
+
+    def _clear_pending(self) -> None:
+        self._pending = ""
+        self._start_stop_btn.config(state="normal")
 
     # ------------------------------------------------------------------
     # Tick
@@ -398,7 +455,8 @@ class DeviceCard(ttk.Frame):
             lbl.config(text=text, foreground=color)
 
         if not running or state not in ("IN_TANK", "AUTO_FARM_OFF", "LOBBY"):
-            for lbl in (self._af_lbl, self._er_lbl, self._sa_lbl, self._lg_lbl):
+            for lbl in (self._af_lbl, self._er_lbl,
+                        self._sa_lbl, self._lg_lbl):
                 _set(lbl, "—", MUTED)
             return
 
@@ -420,9 +478,10 @@ class DeviceCard(ttk.Frame):
             if lg_enabled:
                 _set(self._lg_lbl, _fmt_secs(self._lobby_secs),
                      WARN if self._lobby_secs > 30 else NORMAL)
-                self._alert_label.config(
-                    text=f"In lobby for {_fmt_secs(self._lobby_secs)}",
-                    fg="#92400e", bg="#fef3c7")
+                if not self._pending:
+                    self._alert_label.config(
+                        text=f"In lobby for {_fmt_secs(self._lobby_secs)}",
+                        fg="#92400e", bg="#fef3c7")
             else:
                 _set(self._lg_lbl, "—", MUTED)
 
@@ -441,14 +500,24 @@ class DeviceCard(ttk.Frame):
         state   = status.get("state", "UNKNOWN")
         runtime = status.get("runtime_s", 0.0)
 
+        # Clear pending once the worker state matches what we expected
+        if self._pending == "Starting…" and running:
+            self._clear_pending()
+        elif self._pending == "Stopping…" and not running:
+            self._clear_pending()
+
         if running:
             self._run_badge.config(text="● Running", fg="#166534", bg="#dcfce7")
             self._runtime_label.config(text=_fmt_runtime(runtime))
-            self._start_stop_btn.config(text="Stop")
+            self._start_stop_btn.config(
+                text="Stop",
+                state="normal" if not self._pending else "disabled")
         else:
             self._run_badge.config(text="● Stopped", fg="#991b1b", bg="#fee2e2")
             self._runtime_label.config(text="")
-            self._start_stop_btn.config(text="Start")
+            self._start_stop_btn.config(
+                text="Start",
+                state="normal" if not self._pending else "disabled")
 
         self._is_running = running
 
@@ -456,16 +525,17 @@ class DeviceCard(ttk.Frame):
         fg, bg = _STATE_COLORS.get(display_state, ("#374151", "#f3f4f6"))
         self._state_badge.config(text=display_state, fg=fg, bg=bg)
 
-        alert = _ALERT.get(state) if running else None
-        if state == "LOBBY" and running:
-            # Text kept live by _tick; just set colors
-            self._alert_label.config(fg="#92400e", bg="#fef3c7")
-        elif alert:
-            self._alert_label.config(
-                text=alert[0], fg=alert[1], bg=alert[2])
-        else:
-            self._alert_label.config(
-                text="", fg=_ALERT_EMPTY_FG, bg=_ALERT_EMPTY_BG)
+        # Alert label — don't overwrite a pending message
+        if not self._pending:
+            alert = _ALERT.get(state) if running else None
+            if state == "LOBBY" and running:
+                self._alert_label.config(fg="#92400e", bg="#fef3c7")
+            elif alert:
+                self._alert_label.config(
+                    text=alert[0], fg=alert[1], bg=alert[2])
+            else:
+                self._alert_label.config(
+                    text="", fg=_ALERT_EMPTY_FG, bg=_ALERT_EMPTY_BG)
 
         if running:
             self._af_secs    = status.get("auto_farm_countdown_s",  self._af_secs)
@@ -491,11 +561,20 @@ class DeviceCard(ttk.Frame):
     # ------------------------------------------------------------------
 
     def _toggle_worker(self) -> None:
-        status = self._manager.get_status(self._serial)
-        if status and status.get("running"):
-            self._manager.stop_device(self._serial)
+        if self._is_running:
+            self.set_pending("Stopping…")
+            threading.Thread(
+                target=self._manager.stop_device,
+                args=(self._serial,),
+                daemon=True,
+            ).start()
         else:
-            self._manager.start_device(self._serial)
+            self.set_pending("Starting…")
+            threading.Thread(
+                target=self._manager.start_device,
+                args=(self._serial,),
+                daemon=True,
+            ).start()
 
     def _fire_end_run(self) -> None:
         self._manager.force_end_run(self._serial)

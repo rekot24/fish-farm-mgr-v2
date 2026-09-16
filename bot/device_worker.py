@@ -3,12 +3,23 @@ bot/device_worker.py
 
 The main loop for a single device. One DeviceWorker per connected phone.
 
+Consecutive ADB failure detection:
+  The worker tracks how many times in a row ADB returns "device not found"
+  (checked via _is_roblox_foreground / _is_roblox_running each cycle).
+  Any successful ADB contact resets the counter to zero. If the counter
+  reaches settings.adb_failure_threshold consecutive failures, the worker
+  stops itself cleanly. The card shows as stopped on the main tab and must
+  be restarted manually once the device is back and unlocked.
+
+  "Consecutive" is the key constraint — isolated blips during normal
+  operation will not accumulate toward the threshold across cycles that
+  otherwise succeed.
+
 Rejoin navigation is fully state-driven — no Chrome URL, no hardcoded sleeps.
 Each detected state triggers one action that advances to the next state.
-The loop handles all waiting naturally.
 
 Fast-path rejoin (when 24rolla is visible on home screen):
-  ROBLOX_HOME → tap 24rolla_avatar → FRIEND_CARD → tap join_button → LOADING → IN_TANK
+  ROBLOX_HOME → tap 24rolla_avatar → FRIEND_CARD → tap join_button → IN_TANK
 
 Fallback rejoin (hamburger menu route):
   ROBLOX_HOME → tap hamburger_menu → HAMBURGER_MENU_OPEN
@@ -16,13 +27,13 @@ Fallback rejoin (hamburger menu route):
   → tap befish_game_icon → GAME_PAGE
   → swipe_down_full → GAME_PAGE_SCROLLED
   → tap servers_button → SERVER_LIST
-  → tap private_server_entry → LOADING → IN_TANK
+  → tap private_server_entry → IN_TANK
 
 CRASHED state: launches Roblox if not running, then falls into ROBLOX_HOME
-detection naturally — no sleep, no join call.
+detection naturally.
 
 DISCONNECTED state: fires immediately on detection — taps the Leave button
-found via the disconnected detector's tap offset. No timer involved.
+via the disconnected detector's tap offset. No timer.
 """
 
 from __future__ import annotations
@@ -48,10 +59,12 @@ from config.settings import Settings
 from detection.detector import run_detector_by_name
 from detection.template_bank import TemplateBank
 
+# Sentinel returned by ADB checks to distinguish "device not found" from
+# other failures (permission error, timeout, etc.)
+_DEVICE_NOT_FOUND = "device_not_found"
 
 _DETECTOR_PRIORITY = [
     states.DISCONNECTED,
-    # CRASHED is detected via ADB process check, not screenshot — see _resolve_state()
     states.ROBLOX_HOME,
     states.FRIEND_CARD,
     states.HAMBURGER_MENU_OPEN,
@@ -100,6 +113,11 @@ class DeviceWorker:
         self._lobby_entered_at: Optional[float] = None
         self._unknown_entered_at: Optional[float] = None
 
+        # Consecutive "device not found" counter.
+        # Reset to 0 on any successful ADB contact.
+        # Incremented only on "device not found" — not on other ADB errors.
+        self._consecutive_adb_failures: int = 0
+
         self._last_frame = None
 
     # ------------------------------------------------------------------
@@ -118,6 +136,7 @@ class DeviceWorker:
         if self._running:
             return
         self._stop_event.clear()
+        self._consecutive_adb_failures = 0
         self._start_time = time.monotonic()
         self._thread = threading.Thread(
             target=self._run, daemon=True, name=f"worker-{self._serial[:8]}")
@@ -137,6 +156,7 @@ class DeviceWorker:
         self._last_action = "—"
         self._lobby_entered_at = None
         self._unknown_entered_at = None
+        self._consecutive_adb_failures = 0
         self._log("Worker stopped", "INFO")
 
     def get_status(self) -> dict:
@@ -146,19 +166,19 @@ class DeviceWorker:
         elapsed_end  = now - self._last_end_run_tap
         time_in_lobby = (now - self._lobby_entered_at) if self._lobby_entered_at else 0.0
         return {
-            "serial":                self._serial,
-            "nickname":              cfg.nickname,
-            "model":                 cfg.model,
-            "account":               cfg.account,
-            "running":               self._running,
-            "state":                 self._current_state,
-            "last_action":           self._last_action,
-            "runtime_s":             (now - self._start_time) if self._start_time else 0.0,
-            "auto_farm_countdown_s": max(0.0, cfg.auto_farm_interval_s - elapsed_auto),
-            "end_run_countdown_s":   max(0.0, cfg.end_run_interval_s - elapsed_end),
+            "serial":                 self._serial,
+            "nickname":               cfg.nickname,
+            "model":                  cfg.model,
+            "account":                cfg.account,
+            "running":                self._running,
+            "state":                  self._current_state,
+            "last_action":            self._last_action,
+            "runtime_s":              (now - self._start_time) if self._start_time else 0.0,
+            "auto_farm_countdown_s":  max(0.0, cfg.auto_farm_interval_s - elapsed_auto),
+            "end_run_countdown_s":    max(0.0, cfg.end_run_interval_s - elapsed_end),
             "stay_awake_countdown_s": max(0.0, cfg.stay_awake_interval_s - (now - self._last_stay_awake_tap)),
-            "time_in_lobby_s":       time_in_lobby,
-            "time_in_unknown_s":     (now - self._unknown_entered_at) if self._unknown_entered_at else 0.0,
+            "time_in_lobby_s":        time_in_lobby,
+            "time_in_unknown_s":      (now - self._unknown_entered_at) if self._unknown_entered_at else 0.0,
         }
 
     def force_end_run(self) -> None:
@@ -171,7 +191,6 @@ class DeviceWorker:
     # ------------------------------------------------------------------
 
     def _run(self) -> None:
-        settings = self._get_settings()
         while not self._stop_event.is_set():
             try:
                 settings = self._get_settings()
@@ -179,20 +198,41 @@ class DeviceWorker:
 
                 frame = self._capture.get_frame()
                 if frame is None:
-                    self._log("Frame capture returned None — checking if Roblox is running", "WARNING")
-                    if not self._is_roblox_foreground():
-                        if not self._is_roblox_running():
-                            if self._current_state != states.CRASHED:
-                                self._log("Roblox not running — marking as CRASHED", "WARNING")
-                                self._current_state = states.CRASHED
-                            self._act(states.CRASHED, cfg, settings)
-                        else:
-                            self._log("Roblox is backgrounded — bringing to foreground", "WARNING")
-                            launch_roblox(self._serial)
-                            self._current_state = states.UNKNOWN
+                    self._log("Frame capture returned None — checking if Roblox is running",
+                              "WARNING")
+                    foreground_result = self._check_roblox_foreground()
+
+                    if foreground_result == _DEVICE_NOT_FOUND:
+                        # ADB cannot see the device at all
+                        if self._handle_adb_failure(settings):
+                            return  # worker stopped itself
+                    else:
+                        # ADB contact succeeded — reset failure counter
+                        self._consecutive_adb_failures = 0
+                        if not foreground_result:
+                            running_result = self._check_roblox_running()
+                            if running_result == _DEVICE_NOT_FOUND:
+                                if self._handle_adb_failure(settings):
+                                    return
+                            else:
+                                self._consecutive_adb_failures = 0
+                                if not running_result:
+                                    if self._current_state != states.CRASHED:
+                                        self._log("Roblox not running — marking as CRASHED",
+                                                  "WARNING")
+                                        self._current_state = states.CRASHED
+                                    self._act(states.CRASHED, cfg, settings)
+                                else:
+                                    self._log("Roblox is backgrounded — bringing to foreground",
+                                              "WARNING")
+                                    launch_roblox(self._serial)
+                                    self._current_state = states.UNKNOWN
+
                     time.sleep(settings.loop_interval_s)
                     continue
 
+                # Frame captured — ADB contact is good, reset failure counter
+                self._consecutive_adb_failures = 0
                 self._last_frame = frame
                 detected_state = self._resolve_state(frame, cfg, settings)
                 self._act(detected_state, cfg, settings)
@@ -201,9 +241,40 @@ class DeviceWorker:
             except Exception as e:
                 self._log(
                     f"Unhandled error in worker loop: {type(e).__name__}: {e}", "ERROR")
+                settings = self._get_settings()
                 if settings.development_mode:
                     raise
                 time.sleep(settings.loop_interval_s)
+
+    # ------------------------------------------------------------------
+    # Consecutive failure handling
+    # ------------------------------------------------------------------
+
+    def _handle_adb_failure(self, settings: Settings) -> bool:
+        """
+        Increment the consecutive failure counter. If threshold is reached,
+        stop the worker and return True. Otherwise return False.
+
+        Only called on confirmed "device not found" — not on other ADB errors.
+        Any successful ADB contact resets the counter before this is called.
+        """
+        self._consecutive_adb_failures += 1
+        threshold = settings.adb_failure_threshold
+        self._log(
+            f"Device not found — consecutive failures: "
+            f"{self._consecutive_adb_failures}/{threshold}",
+            "WARNING",
+        )
+        if self._consecutive_adb_failures >= threshold:
+            self._log(
+                f"Device not found {threshold} times in a row — "
+                f"stopping worker. Restart manually when device is back.",
+                "ERROR",
+            )
+            # Stop on a background thread to avoid join deadlock
+            threading.Thread(target=self.stop, daemon=True).start()
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # State resolution
@@ -224,7 +295,8 @@ class DeviceWorker:
             if result.found:
                 app_logger.debug(
                     settings.debug, "detections",
-                    f"{self._serial[:8]} detected {detector_name} (score={result.score:.3f})",
+                    f"{self._serial[:8]} detected {detector_name} "
+                    f"(score={result.score:.3f})",
                     self._log,
                 )
                 if detector_name != self._current_state:
@@ -234,13 +306,18 @@ class DeviceWorker:
                     self._current_state = detector_name
                 return detector_name
 
-        if not self._is_roblox_foreground():
-            if not self._is_roblox_running():
+        foreground_result = self._check_roblox_foreground()
+        if foreground_result == _DEVICE_NOT_FOUND:
+            # Don't increment here — the frame loop already handles it
+            pass
+        elif not foreground_result:
+            running_result = self._check_roblox_running()
+            if running_result != _DEVICE_NOT_FOUND and not running_result:
                 if self._current_state != states.CRASHED:
                     self._log("Roblox not running — marking as CRASHED", "WARNING")
                     self._current_state = states.CRASHED
                 return states.CRASHED
-            else:
+            elif running_result != _DEVICE_NOT_FOUND:
                 self._log("Roblox is backgrounded — bringing to foreground", "WARNING")
                 launch_roblox(self._serial)
                 return states.UNKNOWN
@@ -267,7 +344,8 @@ class DeviceWorker:
         if result.found:
             app_logger.debug(
                 settings.debug, "detections",
-                f"{self._serial[:8]} secondary: {detector_key} (score={result.score:.3f})",
+                f"{self._serial[:8]} secondary: {detector_key} "
+                f"(score={result.score:.3f})",
                 self._log,
             )
         return result.found
@@ -380,11 +458,6 @@ class DeviceWorker:
         self._do_auto_farm_tap(cfg, settings)
 
     def _handle_disconnected(self, cfg: DeviceConfig, settings: Settings) -> None:
-        """
-        Disconnected dialog detected — tap the Leave button immediately.
-        The disconnected detector's tap offset points at the Leave button.
-        No timer; fires on every cycle the state is active until it clears.
-        """
         self._unknown_entered_at = None
         self._reset_lobby_timer()
         self._log("Disconnected dialog — tapping Leave", "INFO")
@@ -419,7 +492,8 @@ class DeviceWorker:
             tap(self._serial, coords[0], coords[1])
             self._set_last_action("Tapped hamburger menu (fallback path)")
         else:
-            self._log("Neither 24rolla_avatar nor hamburger_menu found on home screen", "WARNING")
+            self._log("Neither 24rolla_avatar nor hamburger_menu found on home screen",
+                      "WARNING")
 
     def _handle_friend_card(self, cfg: DeviceConfig, settings: Settings) -> None:
         self._unknown_entered_at = None
@@ -441,7 +515,8 @@ class DeviceWorker:
         else:
             self._log("continue_playing_button not found in hamburger menu", "WARNING")
 
-    def _handle_continue_playing_screen(self, cfg: DeviceConfig, settings: Settings) -> None:
+    def _handle_continue_playing_screen(self, cfg: DeviceConfig,
+                                         settings: Settings) -> None:
         self._unknown_entered_at = None
         coords = self._resolve_tap_coords(cfg, ["befish_game_icon"])
         if coords:
@@ -481,13 +556,18 @@ class DeviceWorker:
     # Action helpers
     # ------------------------------------------------------------------
 
-    def _do_auto_farm_double_click(self, cfg: DeviceConfig, settings: Settings) -> None:
-        coords = self._resolve_tap_coords(cfg, [states.AUTO_FARM_ON, states.AUTO_FARM_OFF])
+    def _do_auto_farm_double_click(self, cfg: DeviceConfig,
+                                    settings: Settings) -> None:
+        coords = self._resolve_tap_coords(
+            cfg, [states.AUTO_FARM_ON, states.AUTO_FARM_OFF])
         if coords is None:
-            self._log("Auto-farm: no assignment found for auto_farm_on or auto_farm_off", "WARNING")
+            self._log(
+                "Auto-farm: no assignment found for auto_farm_on or auto_farm_off",
+                "WARNING")
             return
         self._log("Auto-farm interval elapsed — double-clicking", "INFO")
-        double_tap(self._serial, coords[0], coords[1], delay_s=settings.double_click_delay_s)
+        double_tap(self._serial, coords[0], coords[1],
+                   delay_s=settings.double_click_delay_s)
         self._last_auto_farm_tap = time.monotonic()
         self._set_last_action("Auto-farm double-click")
 
@@ -512,7 +592,8 @@ class DeviceWorker:
     def _do_leave_tap(self, cfg: DeviceConfig) -> None:
         coords = self._resolve_tap_coords(cfg, [states.DISCONNECTED])
         if coords is None:
-            self._log("Leave: no tap offset assigned for disconnected detector", "WARNING")
+            self._log(
+                "Leave: no tap offset assigned for disconnected detector", "WARNING")
             return
         tap(self._serial, coords[0], coords[1])
         self._set_last_action("Tapped Leave")
@@ -562,10 +643,16 @@ class DeviceWorker:
         self._last_end_run_tap = time.monotonic()
 
     # ------------------------------------------------------------------
-    # Utilities
+    # ADB checks — return True/False or _DEVICE_NOT_FOUND sentinel
     # ------------------------------------------------------------------
 
-    def _is_roblox_foreground(self) -> bool:
+    def _check_roblox_foreground(self):
+        """
+        Returns:
+          True  — Roblox is the foreground app
+          False — ADB reachable but Roblox is not foreground
+          _DEVICE_NOT_FOUND — device serial not found by ADB
+        """
         try:
             from config.paths import adb_exe
             result = subprocess.run(
@@ -573,22 +660,33 @@ class DeviceWorker:
                  "dumpsys", "activity", "activities"],
                 capture_output=True, timeout=8.0,
             )
+            stderr = result.stderr.decode("utf-8", errors="replace")
+            if "device not found" in stderr or "device not found" in \
+               result.stdout.decode("utf-8", errors="replace"):
+                return _DEVICE_NOT_FOUND
+
             output = result.stdout.decode("utf-8", errors="replace")
             for line in output.splitlines():
                 if "mResumedActivity" in line or "ResumedActivity" in line:
-                    is_foreground = "com.roblox.client" in line
+                    is_fg = "com.roblox.client" in line
                     self._log(
-                        f"Roblox {'is' if is_foreground else 'is NOT'} foreground app",
-                        "DEBUG" if is_foreground else "WARNING",
+                        f"Roblox {'is' if is_fg else 'is NOT'} foreground app",
+                        "DEBUG" if is_fg else "WARNING",
                     )
-                    return is_foreground
+                    return is_fg
             self._log("Could not determine foreground app", "WARNING")
             return False
         except Exception as e:
             self._log(f"Foreground check failed: {e}", "WARNING")
-            return True
+            return False
 
-    def _is_roblox_running(self) -> bool:
+    def _check_roblox_running(self):
+        """
+        Returns:
+          True  — Roblox process exists (running or backgrounded)
+          False — ADB reachable, Roblox process not found
+          _DEVICE_NOT_FOUND — device serial not found by ADB
+        """
         try:
             from config.paths import adb_exe
             result = subprocess.run(
@@ -596,11 +694,18 @@ class DeviceWorker:
                  "ps", "-A", "-o", "NAME"],
                 capture_output=True, timeout=5.0,
             )
-            output = result.stdout.decode("utf-8", errors="replace")
-            return "com.roblox.client" in output
+            stderr = result.stderr.decode("utf-8", errors="replace")
+            stdout = result.stdout.decode("utf-8", errors="replace")
+            if "device not found" in stderr or "device not found" in stdout:
+                return _DEVICE_NOT_FOUND
+            return "com.roblox.client" in stdout
         except Exception as e:
             self._log(f"Process check failed: {e}", "WARNING")
-            return True
+            return False
+
+    # ------------------------------------------------------------------
+    # Utilities
+    # ------------------------------------------------------------------
 
     def _set_last_action(self, action: str) -> None:
         self._last_action = action
