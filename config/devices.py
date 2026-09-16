@@ -23,22 +23,32 @@ from config.constants import (
 class DetectorAssignment:
     """
     Tracks which image is assigned to a detector for this device,
-    when it was last saved, and any tap coordinate override.
+    when it was last saved/tested, and tap coordinate data.
 
     image_filename : filename within assets/detectors/{detector_name}/
                      Named {detector_name}_{serial}.png by convention.
-    shape          : "box" or "circle" — the crop shape used when saving
     last_tested    : ISO timestamp of last test run
     last_score     : confidence score from last test (0.0 - 1.0)
-    tap_offset_x   : x offset within the crop image for tap override (None = use center)
-    tap_offset_y   : y offset within the crop image for tap override (None = use center)
+    tap_offset_x   : manual tap override — x offset within the crop image
+                     (None = use cached or bbox center)
+    tap_offset_y   : manual tap override — y offset within the crop image
+    cached_tap_x   : persisted screen coordinate from first successful
+                     template match. Populated automatically by the worker
+                     on first hit. Cleared when a new image is assigned.
+    cached_tap_y   : see cached_tap_x.
+
+    Tap priority (in _resolve_tap_coords):
+      1. tap_offset_x/y set (manual override via crop tool) → use it always
+      2. cached_tap_x/y set (persisted from prior session)  → use it
+      3. Neither set → run template match, persist result, use it
     """
     image_filename: Optional[str] = None
-    shape: str = "box"
     last_tested: Optional[str] = None
     last_score: Optional[float] = None
     tap_offset_x: Optional[int] = None
     tap_offset_y: Optional[int] = None
+    cached_tap_x: Optional[int] = None
+    cached_tap_y: Optional[int] = None
 
 
 @dataclass
@@ -48,29 +58,20 @@ class DeviceConfig:
     Stored as one entry in config/devices.json, keyed by ADB serial.
     """
 
-    # ADB serial — unique identifier, never editable by the user.
     serial: str = ""
-
-    # Display identity — shown on the device card.
     nickname: str = ""
     model: str = ""
     account: str = ""
 
-    # Per-device feature flags — each checked every cycle before acting.
     auto_farm_enabled: bool = True
     end_run_enabled: bool = True
     stay_awake_enabled: bool = False
     stuck_lobby_detection_enabled: bool = True
 
-    # Timer intervals (seconds).
     auto_farm_interval_s: float = AUTO_FARM_INTERVAL_S
     end_run_interval_s: float = END_RUN_INTERVAL_S
     stay_awake_interval_s: float = STAY_AWAKE_INTERVAL_S
 
-    # Detector image assignments — keyed by detector name.
-    # Tap coordinates are derived from template match results at runtime
-    # (cached per session) rather than stored as fixed pixel values.
-    # Optional tap_offset_x/y in DetectorAssignment overrides center-of-bbox.
     detector_assignments: dict[str, DetectorAssignment] = field(default_factory=dict)
 
 
@@ -79,11 +80,6 @@ class DeviceConfig:
 # ---------------------------------------------------------------------------
 
 def load_devices() -> dict[str, DeviceConfig]:
-    """
-    Load all device configs from config/devices.json.
-    Returns a dict keyed by ADB serial.
-    Returns an empty dict if the file is absent or corrupt.
-    """
     path = devices_path()
     if not path.exists():
         return {}
@@ -93,7 +89,6 @@ def load_devices() -> dict[str, DeviceConfig]:
         devices = {}
         for serial, entry in raw.items():
             entry = dict(entry)
-            # Strip out any legacy manual tap coordinate fields from old configs
             for old_field in (
                 "auto_farm_tap_x", "auto_farm_tap_y",
                 "end_run_tap_x", "end_run_tap_y",
@@ -121,10 +116,6 @@ def load_devices() -> dict[str, DeviceConfig]:
 
 
 def save_devices(devices: dict[str, DeviceConfig]) -> None:
-    """
-    Persist all device configs to config/devices.json.
-    Creates the file if it does not exist.
-    """
     path = devices_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     output = {serial: asdict(cfg) for serial, cfg in devices.items()}

@@ -1,8 +1,11 @@
 """
 tools/crop_tool.py
 
-Crop tool — captures a live frame, lets the user draw a crop selection
-(box or circle), optionally override the tap point, then saves the image.
+Crop tool — captures a live frame, lets the user draw a box crop selection,
+optionally override the tap point, then saves the image.
+
+Circle mode has been removed — box crops only. This avoids the masking
+artifacts that caused poor template match scores with circle selections.
 
 Fixes in this version:
   - Selection drawing: Tkinter canvas does not support 8-digit hex alpha.
@@ -13,7 +16,6 @@ Fixes in this version:
 
 from __future__ import annotations
 
-import math
 import subprocess
 import threading
 import tkinter as tk
@@ -43,7 +45,8 @@ MAX_ZOOM      = 5.0
 
 class CropTool(tk.Toplevel):
 
-    def __init__(self, parent, serial: str, detector_name: str, manager=None, detector_names: list = None):
+    def __init__(self, parent, serial: str, detector_name: str,
+                 manager=None, detector_names: list = None):
         super().__init__(parent)
         self._serial = serial
         self._detector_name = detector_name
@@ -60,7 +63,7 @@ class CropTool(tk.Toplevel):
         self._pan_x = 0
         self._pan_y = 0
 
-        self._shape = tk.StringVar(value="box")
+        # Box selection state: x1,y1,x2,y2 in frame coords
         self._sel: Optional[dict] = None
         self._drag_mode: Optional[str] = None
         self._drag_start: Optional[Tuple[int, int]] = None
@@ -91,32 +94,32 @@ class CropTool(tk.Toplevel):
         tb = ttk.Frame(self, padding=(8, 6))
         tb.grid(row=0, column=0, sticky="ew")
 
-        ttk.Button(tb, text="Capture frame", command=self._capture).pack(side="left", padx=(0, 8))
+        ttk.Button(tb, text="Capture frame",
+                   command=self._capture).pack(side="left", padx=(0, 8))
         ttk.Separator(tb, orient="vertical").pack(side="left", fill="y", padx=6)
 
         ttk.Label(tb, text="Zoom").pack(side="left")
-        ttk.Button(tb, text="−", width=2, command=lambda: self._adj_zoom(-ZOOM_STEP)).pack(side="left", padx=2)
+        ttk.Button(tb, text="−", width=2,
+                   command=lambda: self._adj_zoom(-ZOOM_STEP)).pack(side="left", padx=2)
         self._zoom_label = ttk.Label(tb, text="100%", width=5, anchor="center")
         self._zoom_label.pack(side="left")
-        ttk.Button(tb, text="+", width=2, command=lambda: self._adj_zoom(ZOOM_STEP)).pack(side="left", padx=2)
-        ttk.Button(tb, text="Fit", command=self._zoom_fit).pack(side="left", padx=(2, 0))
-
-        ttk.Separator(tb, orient="vertical").pack(side="left", fill="y", padx=6)
-        ttk.Label(tb, text="Shape").pack(side="left")
-        ttk.Radiobutton(tb, text="Box",    variable=self._shape, value="box",    command=self._on_shape_change).pack(side="left", padx=2)
-        ttk.Radiobutton(tb, text="Circle", variable=self._shape, value="circle", command=self._on_shape_change).pack(side="left", padx=2)
+        ttk.Button(tb, text="+", width=2,
+                   command=lambda: self._adj_zoom(ZOOM_STEP)).pack(side="left", padx=2)
+        ttk.Button(tb, text="Fit",
+                   command=self._zoom_fit).pack(side="left", padx=(2, 0))
 
         ttk.Separator(tb, orient="vertical").pack(side="left", fill="y", padx=6)
         ttk.Label(tb, text="Detector:").pack(side="left")
         self._detector_var = tk.StringVar(value=self._detector_name)
         self._detector_combo = ttk.Combobox(
             tb, textvariable=self._detector_var,
-            values=self._detector_names, state="readonly", width=18
+            values=self._detector_names, state="readonly", width=22,
         )
         self._detector_combo.pack(side="left", padx=(2, 0))
         self._detector_combo.bind("<<ComboboxSelected>>", self._on_detector_change)
 
-        self._status_label = ttk.Label(tb, text="Capture a frame to begin.", foreground="#888")
+        self._status_label = ttk.Label(tb, text="Capture a frame to begin.",
+                                        foreground="#888")
         self._status_label.pack(side="right")
 
     def _build_body(self) -> None:
@@ -125,12 +128,15 @@ class CropTool(tk.Toplevel):
         body.rowconfigure(0, weight=1)
         body.columnconfigure(0, weight=1)
 
-        # Canvas with scrollbars for panning when zoomed
-        self._canvas = tk.Canvas(body, bg="#111827", cursor="crosshair",
-                                  highlightthickness=0, xscrollincrement=1, yscrollincrement=1)
-        h_scroll = ttk.Scrollbar(body, orient="horizontal", command=self._canvas.xview)
-        v_scroll = ttk.Scrollbar(body, orient="vertical",   command=self._canvas.yview)
-        self._canvas.configure(xscrollcommand=h_scroll.set, yscrollcommand=v_scroll.set)
+        self._canvas = tk.Canvas(
+            body, bg="#111827", cursor="crosshair",
+            highlightthickness=0, xscrollincrement=1, yscrollincrement=1)
+        h_scroll = ttk.Scrollbar(body, orient="horizontal",
+                                  command=self._canvas.xview)
+        v_scroll = ttk.Scrollbar(body, orient="vertical",
+                                  command=self._canvas.yview)
+        self._canvas.configure(xscrollcommand=h_scroll.set,
+                                yscrollcommand=v_scroll.set)
 
         self._canvas.grid(row=0, column=0, sticky="nsew")
         v_scroll.grid(row=0, column=1, sticky="ns")
@@ -151,42 +157,60 @@ class CropTool(tk.Toplevel):
         self._build_sidebar(sidebar)
 
     def _build_sidebar(self, f: ttk.Frame) -> None:
-        ttk.Label(f, text="DETECTOR", font=("", 9), foreground="#888").grid(row=0, column=0, sticky="w")
-        self._det_name_label = ttk.Label(f, text=self._detector_name, font=("", 12, "bold"))
+        ttk.Label(f, text="DETECTOR", font=("", 9),
+                  foreground="#888").grid(row=0, column=0, sticky="w")
+        self._det_name_label = ttk.Label(f, text=self._detector_name,
+                                          font=("", 12, "bold"))
         self._det_name_label.grid(row=1, column=0, sticky="w", pady=(2, 0))
-        ttk.Label(f, text=self._serial[:16], foreground="#888", font=("", 9)).grid(row=2, column=0, sticky="w", pady=(0, 10))
+        ttk.Label(f, text=self._serial[:16], foreground="#888",
+                  font=("", 9)).grid(row=2, column=0, sticky="w", pady=(0, 10))
 
-        ttk.Separator(f, orient="horizontal").grid(row=3, column=0, sticky="ew", pady=(0, 8))
+        ttk.Separator(f, orient="horizontal").grid(
+            row=3, column=0, sticky="ew", pady=(0, 8))
 
-        ttk.Label(f, text="PREVIEW", font=("", 9), foreground="#888").grid(row=4, column=0, sticky="w")
-        self._preview_canvas = tk.Canvas(f, width=SIDEBAR_W - 20, height=80, bg="#111827",
-                                          highlightthickness=1, highlightbackground="#374151")
+        ttk.Label(f, text="PREVIEW", font=("", 9),
+                  foreground="#888").grid(row=4, column=0, sticky="w")
+        self._preview_canvas = tk.Canvas(
+            f, width=SIDEBAR_W - 20, height=80, bg="#111827",
+            highlightthickness=1, highlightbackground="#374151")
         self._preview_canvas.grid(row=5, column=0, sticky="ew", pady=(4, 0))
 
-        self._crop_info = ttk.Label(f, text="No selection", foreground="#888", font=("", 9))
+        self._crop_info = ttk.Label(f, text="No selection",
+                                     foreground="#888", font=("", 9))
         self._crop_info.grid(row=6, column=0, sticky="w", pady=(4, 0))
 
-        ttk.Separator(f, orient="horizontal").grid(row=7, column=0, sticky="ew", pady=8)
+        ttk.Separator(f, orient="horizontal").grid(
+            row=7, column=0, sticky="ew", pady=8)
 
-        ttk.Label(f, text="TAP COORDINATE", font=("", 9), foreground="#888").grid(row=8, column=0, sticky="w")
-        ttk.Radiobutton(f, text="Use center (default)", variable=self._tap_mode, value="center",
-                        command=self._on_tap_mode_change).grid(row=9, column=0, sticky="w", pady=1)
-        ttk.Radiobutton(f, text="Override tap point", variable=self._tap_mode, value="override",
-                        command=self._on_tap_mode_change).grid(row=10, column=0, sticky="w", pady=1)
+        ttk.Label(f, text="TAP COORDINATE", font=("", 9),
+                  foreground="#888").grid(row=8, column=0, sticky="w")
+        ttk.Radiobutton(f, text="Use center (default)",
+                        variable=self._tap_mode, value="center",
+                        command=self._on_tap_mode_change).grid(
+            row=9, column=0, sticky="w", pady=1)
+        ttk.Radiobutton(f, text="Override tap point",
+                        variable=self._tap_mode, value="override",
+                        command=self._on_tap_mode_change).grid(
+            row=10, column=0, sticky="w", pady=1)
 
         self._tap_info_frame = ttk.Frame(f)
         self._tap_info_frame.grid(row=11, column=0, sticky="ew", pady=(6, 0))
-        self._tap_info_label = ttk.Label(self._tap_info_frame, text="Tap: center of crop",
-                                          foreground="#888", font=("", 9), wraplength=SIDEBAR_W - 20)
+        self._tap_info_label = ttk.Label(
+            self._tap_info_frame, text="Tap: center of crop",
+            foreground="#888", font=("", 9), wraplength=SIDEBAR_W - 20)
         self._tap_info_label.pack(anchor="w")
 
-        self._clear_override_btn = ttk.Button(f, text="Clear override", command=self._clear_tap_override)
+        self._clear_override_btn = ttk.Button(
+            f, text="Clear override", command=self._clear_tap_override)
 
-        ttk.Separator(f, orient="horizontal").grid(row=12, column=0, sticky="ew", pady=8)
+        ttk.Separator(f, orient="horizontal").grid(
+            row=12, column=0, sticky="ew", pady=8)
 
-        self._save_btn = ttk.Button(f, text="Save crop", command=self._save, state="disabled")
+        self._save_btn = ttk.Button(f, text="Save crop",
+                                     command=self._save, state="disabled")
         self._save_btn.grid(row=13, column=0, sticky="ew")
-        ttk.Button(f, text="Discard", command=self.destroy).grid(row=14, column=0, sticky="ew", pady=(4, 0))
+        ttk.Button(f, text="Discard", command=self.destroy).grid(
+            row=14, column=0, sticky="ew", pady=(4, 0))
 
     def _build_statusbar(self) -> None:
         sb = ttk.Frame(self, padding=(8, 4))
@@ -198,24 +222,19 @@ class CropTool(tk.Toplevel):
 
     def _center_on_parent(self, parent) -> None:
         self.update_idletasks()
-        px = parent.winfo_rootx() + parent.winfo_width() // 2 - self.winfo_width() // 2
+        px = parent.winfo_rootx() + parent.winfo_width()  // 2 - self.winfo_width()  // 2
         py = parent.winfo_rooty() + parent.winfo_height() // 2 - self.winfo_height() // 2
         self.geometry(f"+{max(0, px)}+{max(0, py)}")
 
     def _on_detector_change(self, event=None) -> None:
-        """Switch detector — clear selection but keep the captured frame."""
         self._detector_name = self._detector_var.get()
         self._sel = None
         self._tap_offset = None
         self._tap_mode.set("center")
         self._save_btn.config(state="disabled")
-        # Update sidebar detector labels
-        for widget in self.winfo_children():
-            pass  # labels updated below
         self._redraw()
         self._update_sidebar()
         self.title(f"Crop tool — {self._serial[:12]} · {self._detector_name}")
-        # Update sidebar detector name labels
         try:
             self._det_name_label.config(text=self._detector_name)
         except Exception:
@@ -234,12 +253,14 @@ class CropTool(tk.Toplevel):
                     capture_output=True, timeout=ADB_DEFAULT_TIMEOUT_S,
                 )
                 if result.returncode != 0 or not result.stdout:
-                    self.after(0, lambda: self._set_status("Capture failed.", error=True))
+                    self.after(0, lambda: self._set_status(
+                        "Capture failed.", error=True))
                     return
                 arr = np.frombuffer(result.stdout, dtype=np.uint8)
                 frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
                 if frame is None:
-                    self.after(0, lambda: self._set_status("Could not decode screenshot.", error=True))
+                    self.after(0, lambda: self._set_status(
+                        "Could not decode screenshot.", error=True))
                     return
                 self.after(0, lambda f=frame: self._show_frame(f))
             except Exception as e:
@@ -252,37 +273,29 @@ class CropTool(tk.Toplevel):
         self._tap_offset = None
         self._zoom_fit()
         h, w = frame.shape[:2]
-        self._sb_left.config(text=f"Frame: {w}×{h}  ·  Drag to draw  ·  Scroll to zoom")
+        self._sb_left.config(
+            text=f"Frame: {w}×{h}  ·  Drag to draw  ·  Scroll to zoom")
         self._set_status(f"Frame captured · {w}×{h}")
         self._update_sidebar()
 
     # ------------------------------------------------------------------
-    # Zoom — anchors to mouse position
+    # Zoom
     # ------------------------------------------------------------------
 
-    def _adj_zoom(self, delta: float, mouse_cx: int = None, mouse_cy: int = None) -> None:
-        """
-        Zoom in/out, keeping the point under the mouse cursor stationary.
-        If no mouse position given (button click), zoom toward canvas center.
-        """
+    def _adj_zoom(self, delta: float, mouse_cx: int = None,
+                  mouse_cy: int = None) -> None:
         old_zoom = self._zoom
         new_zoom = max(MIN_ZOOM, min(MAX_ZOOM, self._zoom + delta))
         if new_zoom == old_zoom:
             return
-
-        # Anchor point in canvas coords
         cw = self._canvas.winfo_width()
         ch = self._canvas.winfo_height()
         ax = mouse_cx if mouse_cx is not None else cw // 2
         ay = mouse_cy if mouse_cy is not None else ch // 2
-
-        # Keep the frame pixel under the anchor stationary
-        # frame_x = (ax - pan_x) / old_zoom  →  new_pan_x = ax - frame_x * new_zoom
         frame_x = (ax - self._pan_x) / old_zoom
         frame_y = (ay - self._pan_y) / old_zoom
         self._pan_x = int(ax - frame_x * new_zoom)
         self._pan_y = int(ay - frame_y * new_zoom)
-
         self._zoom = new_zoom
         self._zoom_label.config(text=f"{int(self._zoom * 100)}%")
         self._redraw()
@@ -290,7 +303,7 @@ class CropTool(tk.Toplevel):
     def _zoom_fit(self) -> None:
         if self._frame is None:
             return
-        cw = self._canvas.winfo_width() or WINDOW_WIDTH - SIDEBAR_W
+        cw = self._canvas.winfo_width()  or WINDOW_WIDTH - SIDEBAR_W
         ch = self._canvas.winfo_height() or WINDOW_HEIGHT - 80
         h, w = self._frame.shape[:2]
         self._zoom = min(cw / w, ch / h, 1.0)
@@ -303,16 +316,16 @@ class CropTool(tk.Toplevel):
         if self._frame is None:
             return
         delta = ZOOM_STEP if (event.num == 4 or event.delta > 0) else -ZOOM_STEP
-        self._adj_zoom(delta, mouse_cx=int(self._canvas.canvasx(event.x)), mouse_cy=int(self._canvas.canvasy(event.y)))
+        self._adj_zoom(delta,
+                       mouse_cx=int(self._canvas.canvasx(event.x)),
+                       mouse_cy=int(self._canvas.canvasy(event.y)))
 
     def _update_scroll_region(self) -> None:
-        """Update canvas scroll region to match the zoomed image size."""
         if self._frame is None:
             return
         h, w = self._frame.shape[:2]
         nw = int(w * self._zoom)
         nh = int(h * self._zoom)
-        # Scroll region is the full image extent from pan position
         x0 = min(0, self._pan_x)
         y0 = min(0, self._pan_y)
         x1 = max(self._canvas.winfo_width(),  self._pan_x + nw)
@@ -333,45 +346,37 @@ class CropTool(tk.Toplevel):
         return fx, fy
 
     def _frame_to_canvas(self, fx: int, fy: int) -> Tuple[int, int]:
-        return int(fx * self._zoom + self._pan_x), int(fy * self._zoom + self._pan_y)
+        return (int(fx * self._zoom + self._pan_x),
+                int(fy * self._zoom + self._pan_y))
 
     # ------------------------------------------------------------------
-    # Selection
+    # Selection (box only)
     # ------------------------------------------------------------------
 
     def _empty_sel(self) -> dict:
-        return {"shape": self._shape.get(), "x1": 0, "y1": 0, "x2": 0, "y2": 0, "cx": 0, "cy": 0, "r": 0}
+        return {"x1": 0, "y1": 0, "x2": 0, "y2": 0}
 
     def _sel_contains(self, cx: int, cy: int) -> bool:
         if self._sel is None:
             return False
-        if self._sel["shape"] == "box":
-            x1c, y1c = self._frame_to_canvas(self._sel["x1"], self._sel["y1"])
-            x2c, y2c = self._frame_to_canvas(self._sel["x2"], self._sel["y2"])
-            return x1c <= cx <= x2c and y1c <= cy <= y2c
-        else:
-            ccx, ccy = self._frame_to_canvas(self._sel["cx"], self._sel["cy"])
-            return math.hypot(cx - ccx, cy - ccy) <= self._sel["r"] * self._zoom
+        x1c, y1c = self._frame_to_canvas(self._sel["x1"], self._sel["y1"])
+        x2c, y2c = self._frame_to_canvas(self._sel["x2"], self._sel["y2"])
+        return x1c <= cx <= x2c and y1c <= cy <= y2c
 
     def _hit_handle(self, cx: int, cy: int) -> Optional[str]:
         if self._sel is None:
             return None
         tol = HANDLE_SIZE + 3
-        if self._sel["shape"] == "box":
-            x1c, y1c = self._frame_to_canvas(self._sel["x1"], self._sel["y1"])
-            x2c, y2c = self._frame_to_canvas(self._sel["x2"], self._sel["y2"])
-            mxc, myc = (x1c + x2c) // 2, (y1c + y2c) // 2
-            handles = {
-                "corner:nw": (x1c, y1c), "corner:ne": (x2c, y1c),
-                "corner:sw": (x1c, y2c), "corner:se": (x2c, y2c),
-                "edge:n": (mxc, y1c), "edge:s": (mxc, y2c),
-                "edge:w": (x1c, myc), "edge:e": (x2c, myc),
-            }
-        else:
-            ccx, ccy = self._frame_to_canvas(self._sel["cx"], self._sel["cy"])
-            rc = int(self._sel["r"] * self._zoom)
-            handles = {"circle:top": (ccx, ccy - rc), "circle:right": (ccx + rc, ccy)}
-
+        x1c, y1c = self._frame_to_canvas(self._sel["x1"], self._sel["y1"])
+        x2c, y2c = self._frame_to_canvas(self._sel["x2"], self._sel["y2"])
+        mxc = (x1c + x2c) // 2
+        myc = (y1c + y2c) // 2
+        handles = {
+            "corner:nw": (x1c, y1c), "corner:ne": (x2c, y1c),
+            "corner:sw": (x1c, y2c), "corner:se": (x2c, y2c),
+            "edge:n":    (mxc, y1c), "edge:s":    (mxc, y2c),
+            "edge:w":    (x1c, myc), "edge:e":    (x2c, myc),
+        }
         for name, (hx, hy) in handles.items():
             if abs(cx - hx) <= tol and abs(cy - hy) <= tol:
                 return name
@@ -388,10 +393,12 @@ class CropTool(tk.Toplevel):
         cy = int(self._canvas.canvasy(event.y))
         handle = self._hit_handle(cx, cy)
 
-        if self._tap_mode.get() == "override" and self._sel is not None and handle is None:
-            if self._sel_contains(cx, cy):
-                self._place_tap_override(cx, cy)
-                return
+        if (self._tap_mode.get() == "override"
+                and self._sel is not None
+                and handle is None
+                and self._sel_contains(cx, cy)):
+            self._place_tap_override(cx, cy)
+            return
 
         if handle:
             self._drag_mode = handle
@@ -406,10 +413,7 @@ class CropTool(tk.Toplevel):
             self._tap_offset = None
             self._tap_mode.set("center")
             fx, fy = self._canvas_to_frame(cx, cy)
-            if self._sel["shape"] == "box":
-                self._sel.update(x1=fx, y1=fy, x2=fx, y2=fy)
-            else:
-                self._sel.update(cx=fx, cy=fy, r=0)
+            self._sel.update(x1=fx, y1=fy, x2=fx, y2=fy)
             self._drag_mode = "draw"
             self._drag_start = (cx, cy)
             self._drag_sel_snapshot = dict(self._sel)
@@ -419,49 +423,60 @@ class CropTool(tk.Toplevel):
             return
         cx = int(self._canvas.canvasx(event.x))
         cy = int(self._canvas.canvasy(event.y))
-        dx_c = cx - self._drag_start[0]
-        dy_c = cy - self._drag_start[1]
-        dx_f = int(dx_c / self._zoom)
-        dy_f = int(dy_c / self._zoom)
+        dx_f = int((cx - self._drag_start[0]) / self._zoom)
+        dy_f = int((cy - self._drag_start[1]) / self._zoom)
         snap = self._drag_sel_snapshot
         h, w = self._frame.shape[:2]
-        def clamp(v, lo, hi): return max(lo, min(v, hi))
+
+        def clamp(v, lo, hi):
+            return max(lo, min(v, hi))
 
         if self._drag_mode == "draw":
             fx, fy = self._canvas_to_frame(cx, cy)
-            if self._sel["shape"] == "box":
-                ox, oy = snap["x1"], snap["y1"]
-                self._sel.update(x1=min(ox,fx), y1=min(oy,fy), x2=max(ox,fx), y2=max(oy,fy))
-            else:
-                self._sel.update(r=max(0, int(math.hypot(dx_c, dy_c) / self._zoom)))
+            ox, oy = snap["x1"], snap["y1"]
+            self._sel.update(
+                x1=min(ox, fx), y1=min(oy, fy),
+                x2=max(ox, fx), y2=max(oy, fy))
 
         elif self._drag_mode == "move":
-            if self._sel["shape"] == "box":
-                bw = snap["x2"] - snap["x1"]; bh = snap["y2"] - snap["y1"]
-                nx1 = clamp(snap["x1"]+dx_f, 0, w-1)
-                ny1 = clamp(snap["y1"]+dy_f, 0, h-1)
-                self._sel.update(x1=nx1, y1=ny1, x2=clamp(nx1+bw,0,w-1), y2=clamp(ny1+bh,0,h-1))
-            else:
-                self._sel.update(cx=clamp(snap["cx"]+dx_f,0,w-1), cy=clamp(snap["cy"]+dy_f,0,h-1))
+            bw = snap["x2"] - snap["x1"]
+            bh = snap["y2"] - snap["y1"]
+            nx1 = clamp(snap["x1"] + dx_f, 0, w - 1)
+            ny1 = clamp(snap["y1"] + dy_f, 0, h - 1)
+            self._sel.update(
+                x1=nx1, y1=ny1,
+                x2=clamp(nx1 + bw, 0, w - 1),
+                y2=clamp(ny1 + bh, 0, h - 1))
 
         elif self._drag_mode.startswith("corner:"):
             c = self._drag_mode.split(":")[1]
-            if c=="nw": self._sel.update(x1=clamp(snap["x1"]+dx_f,0,snap["x2"]-1), y1=clamp(snap["y1"]+dy_f,0,snap["y2"]-1))
-            elif c=="ne": self._sel.update(x2=clamp(snap["x2"]+dx_f,snap["x1"]+1,w-1), y1=clamp(snap["y1"]+dy_f,0,snap["y2"]-1))
-            elif c=="sw": self._sel.update(x1=clamp(snap["x1"]+dx_f,0,snap["x2"]-1), y2=clamp(snap["y2"]+dy_f,snap["y1"]+1,h-1))
-            elif c=="se": self._sel.update(x2=clamp(snap["x2"]+dx_f,snap["x1"]+1,w-1), y2=clamp(snap["y2"]+dy_f,snap["y1"]+1,h-1))
+            if c == "nw":
+                self._sel.update(
+                    x1=clamp(snap["x1"]+dx_f, 0, snap["x2"]-1),
+                    y1=clamp(snap["y1"]+dy_f, 0, snap["y2"]-1))
+            elif c == "ne":
+                self._sel.update(
+                    x2=clamp(snap["x2"]+dx_f, snap["x1"]+1, w-1),
+                    y1=clamp(snap["y1"]+dy_f, 0, snap["y2"]-1))
+            elif c == "sw":
+                self._sel.update(
+                    x1=clamp(snap["x1"]+dx_f, 0, snap["x2"]-1),
+                    y2=clamp(snap["y2"]+dy_f, snap["y1"]+1, h-1))
+            elif c == "se":
+                self._sel.update(
+                    x2=clamp(snap["x2"]+dx_f, snap["x1"]+1, w-1),
+                    y2=clamp(snap["y2"]+dy_f, snap["y1"]+1, h-1))
 
         elif self._drag_mode.startswith("edge:"):
             e = self._drag_mode.split(":")[1]
-            if e=="n": self._sel.update(y1=clamp(snap["y1"]+dy_f,0,snap["y2"]-1))
-            elif e=="s": self._sel.update(y2=clamp(snap["y2"]+dy_f,snap["y1"]+1,h-1))
-            elif e=="w": self._sel.update(x1=clamp(snap["x1"]+dx_f,0,snap["x2"]-1))
-            elif e=="e": self._sel.update(x2=clamp(snap["x2"]+dx_f,snap["x1"]+1,w-1))
-
-        elif self._drag_mode.startswith("circle:"):
-            ccx_c, ccy_c = self._frame_to_canvas(snap["cx"], snap["cy"])
-            r = int(math.hypot(cx - ccx_c, cy - ccy_c) / self._zoom)
-            self._sel.update(r=max(1, r))
+            if e == "n":
+                self._sel.update(y1=clamp(snap["y1"]+dy_f, 0, snap["y2"]-1))
+            elif e == "s":
+                self._sel.update(y2=clamp(snap["y2"]+dy_f, snap["y1"]+1, h-1))
+            elif e == "w":
+                self._sel.update(x1=clamp(snap["x1"]+dx_f, 0, snap["x2"]-1))
+            elif e == "e":
+                self._sel.update(x2=clamp(snap["x2"]+dx_f, snap["x1"]+1, w-1))
 
         self._redraw()
         self._update_sidebar()
@@ -488,11 +503,10 @@ class CropTool(tk.Toplevel):
         handle = self._hit_handle(cx, cy)
         if handle:
             cursors = {
-                "corner:nw": "top_left_corner", "corner:ne": "top_right_corner",
-                "corner:sw": "bottom_left_corner", "corner:se": "bottom_right_corner",
-                "edge:n": "top_side", "edge:s": "bottom_side",
+                "corner:nw": "top_left_corner",  "corner:ne": "top_right_corner",
+                "corner:sw": "bottom_left_corner","corner:se": "bottom_right_corner",
+                "edge:n": "top_side",  "edge:s": "bottom_side",
                 "edge:w": "left_side", "edge:e": "right_side",
-                "circle:top": "top_side", "circle:right": "right_side",
             }
             self._canvas.config(cursor=cursors.get(handle, "crosshair"))
         elif self._sel_contains(cx, cy):
@@ -514,11 +528,8 @@ class CropTool(tk.Toplevel):
         if self._sel is None:
             return
         fx, fy = self._canvas_to_frame(cx, cy)
-        if self._sel["shape"] == "box":
-            ox, oy = fx - self._sel["x1"], fy - self._sel["y1"]
-        else:
-            ox = fx - (self._sel["cx"] - self._sel["r"])
-            oy = fy - (self._sel["cy"] - self._sel["r"])
+        ox = fx - self._sel["x1"]
+        oy = fy - self._sel["y1"]
         self._tap_offset = (max(0, ox), max(0, oy))
         self._redraw()
         self._update_sidebar()
@@ -529,15 +540,8 @@ class CropTool(tk.Toplevel):
         self._redraw()
         self._update_sidebar()
 
-    def _on_shape_change(self) -> None:
-        self._sel = None
-        self._tap_offset = None
-        self._redraw()
-        self._update_sidebar()
-        self._save_btn.config(state="disabled")
-
     # ------------------------------------------------------------------
-    # Drawing — NO 8-digit hex alpha; use stipple for transparency
+    # Drawing
     # ------------------------------------------------------------------
 
     def _redraw(self) -> None:
@@ -550,27 +554,20 @@ class CropTool(tk.Toplevel):
         rgb = cv2.cvtColor(self._frame, cv2.COLOR_BGR2RGB)
         pil = Image.fromarray(rgb).resize((nw, nh), Image.LANCZOS)
         self._photo = ImageTk.PhotoImage(pil)
-        self._canvas.create_image(self._pan_x, self._pan_y, anchor="nw", image=self._photo)
-
+        self._canvas.create_image(self._pan_x, self._pan_y,
+                                   anchor="nw", image=self._photo)
         self._update_scroll_region()
 
-        if self._sel is not None:
-            if self._sel["shape"] == "box":
-                self._draw_box_selection()
-            else:
-                self._draw_circle_selection()
+        if self._sel is not None and self._sel_is_valid():
+            self._draw_box_selection()
 
-            # Tap override dot
             if self._tap_offset is not None:
-                if self._sel["shape"] == "box":
-                    tdx = self._sel["x1"] + self._tap_offset[0]
-                    tdy = self._sel["y1"] + self._tap_offset[1]
-                else:
-                    tdx = self._sel["cx"] - self._sel["r"] + self._tap_offset[0]
-                    tdy = self._sel["cy"] - self._sel["r"] + self._tap_offset[1]
+                tdx = self._sel["x1"] + self._tap_offset[0]
+                tdy = self._sel["y1"] + self._tap_offset[1]
                 tcx, tcy = self._frame_to_canvas(tdx, tdy)
-                self._canvas.create_oval(tcx-5, tcy-5, tcx+5, tcy+5,
-                                          fill="#f59e0b", outline="white", width=2)
+                self._canvas.create_oval(
+                    tcx-5, tcy-5, tcx+5, tcy+5,
+                    fill="#f59e0b", outline="white", width=2)
 
     def _draw_box_selection(self) -> None:
         s = self._sel
@@ -579,44 +576,29 @@ class CropTool(tk.Toplevel):
         mxc = (x1c + x2c) // 2
         myc = (y1c + y2c) // 2
 
-        # Fill with stipple for semi-transparent look (no 8-digit hex in Tkinter)
-        self._canvas.create_rectangle(x1c, y1c, x2c, y2c,
-                                       outline="#60a5fa", width=2,
-                                       fill="#4488ff", stipple="gray25")
+        self._canvas.create_rectangle(
+            x1c, y1c, x2c, y2c,
+            outline="#60a5fa", width=2,
+            fill="#4488ff", stipple="gray25")
 
-        # Corner handles
         hs = HANDLE_SIZE
         for hx, hy in [(x1c,y1c),(x2c,y1c),(x1c,y2c),(x2c,y2c)]:
-            self._canvas.create_rectangle(hx-hs, hy-hs, hx+hs, hy+hs,
-                                           fill="#60a5fa", outline="white", width=1)
+            self._canvas.create_rectangle(
+                hx-hs, hy-hs, hx+hs, hy+hs,
+                fill="#60a5fa", outline="white", width=1)
 
-        # Edge handles
         er = EDGE_HANDLE_R
         for hx, hy in [(mxc,y1c),(mxc,y2c),(x1c,myc),(x2c,myc)]:
-            self._canvas.create_oval(hx-er, hy-er, hx+er, hy+er,
-                                      fill="#93c5fd", outline="white", width=1)
+            self._canvas.create_oval(
+                hx-er, hy-er, hx+er, hy+er,
+                fill="#93c5fd", outline="white", width=1)
 
-        # Crosshairs
         cw = self._canvas.winfo_width()
         ch = self._canvas.winfo_height()
-        self._canvas.create_line(0, y1c, cw, y1c, fill="#4488ff", dash=(4,4))
-        self._canvas.create_line(0, y2c, cw, y2c, fill="#4488ff", dash=(4,4))
-        self._canvas.create_line(x1c, 0, x1c, ch, fill="#4488ff", dash=(4,4))
-        self._canvas.create_line(x2c, 0, x2c, ch, fill="#4488ff", dash=(4,4))
-
-    def _draw_circle_selection(self) -> None:
-        s = self._sel
-        ccx, ccy = self._frame_to_canvas(s["cx"], s["cy"])
-        rc = int(s["r"] * self._zoom)
-
-        self._canvas.create_oval(ccx-rc, ccy-rc, ccx+rc, ccy+rc,
-                                   outline="#60a5fa", width=3,
-                                   fill="")
-
-        hs = HANDLE_SIZE
-        for hx, hy in [(ccx, ccy-rc), (ccx+rc, ccy)]:
-            self._canvas.create_oval(hx-hs, hy-hs, hx+hs, hy+hs,
-                                      fill="#60a5fa", outline="white", width=1)
+        self._canvas.create_line(0, y1c, cw, y1c, fill="#4488ff", dash=(4, 4))
+        self._canvas.create_line(0, y2c, cw, y2c, fill="#4488ff", dash=(4, 4))
+        self._canvas.create_line(x1c, 0, x1c, ch, fill="#4488ff", dash=(4, 4))
+        self._canvas.create_line(x2c, 0, x2c, ch, fill="#4488ff", dash=(4, 4))
 
     # ------------------------------------------------------------------
     # Sidebar
@@ -631,13 +613,12 @@ class CropTool(tk.Toplevel):
             return
 
         s = self._sel
-        if s["shape"] == "box":
-            self._crop_info.config(text=f"Box  {s['x2']-s['x1']}×{s['y2']-s['y1']} px  ({s['x1']},{s['y1']})")
-        else:
-            self._crop_info.config(text=f"Circle  r={s['r']} px  center ({s['cx']},{s['cy']})")
+        self._crop_info.config(
+            text=f"{s['x2']-s['x1']}×{s['y2']-s['y1']} px  ({s['x1']},{s['y1']})")
 
         if self._tap_offset is not None:
-            self._tap_info_label.config(text=f"Override: ({self._tap_offset[0]}, {self._tap_offset[1]}) within crop")
+            self._tap_info_label.config(
+                text=f"Override: ({self._tap_offset[0]}, {self._tap_offset[1]}) within crop")
             self._clear_override_btn.grid(row=12, column=0, sticky="w", pady=(4, 0))
         else:
             self._tap_info_label.config(text="Tap: center of crop")
@@ -647,7 +628,8 @@ class CropTool(tk.Toplevel):
         self._preview_canvas.delete("all")
         if self._frame is None or self._sel is None or not self._sel_is_valid():
             self._preview_canvas.create_text(
-                (SIDEBAR_W-20)//2, 40, text="No selection", fill="#6b7280", font=("",9))
+                (SIDEBAR_W-20)//2, 40, text="No selection",
+                fill="#6b7280", font=("", 9))
             return
 
         crop = self._get_crop_image()
@@ -656,18 +638,21 @@ class CropTool(tk.Toplevel):
 
         pw, ph = SIDEBAR_W - 20, 80
         ch2, cw2 = crop.shape[:2]
-        scale = min(pw/cw2, ph/ch2, 1.0)
+        scale = min(pw / cw2, ph / ch2, 1.0)
         nw2, nh2 = max(1, int(cw2*scale)), max(1, int(ch2*scale))
         rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
         pil = Image.fromarray(rgb).resize((nw2, nh2), Image.LANCZOS)
         self._prev_photo = ImageTk.PhotoImage(pil)
-        ox, oy = (pw-nw2)//2, (ph-nh2)//2
-        self._preview_canvas.create_image(ox, oy, anchor="nw", image=self._prev_photo)
+        ox, oy = (pw - nw2) // 2, (ph - nh2) // 2
+        self._preview_canvas.create_image(ox, oy, anchor="nw",
+                                           image=self._prev_photo)
 
         if self._tap_offset is not None:
             tx = ox + int(self._tap_offset[0] * scale)
             ty = oy + int(self._tap_offset[1] * scale)
-            self._preview_canvas.create_oval(tx-4,ty-4,tx+4,ty+4, fill="#f59e0b", outline="white", width=1)
+            self._preview_canvas.create_oval(
+                tx-4, ty-4, tx+4, ty+4,
+                fill="#f59e0b", outline="white", width=1)
 
     # ------------------------------------------------------------------
     # Crop
@@ -676,31 +661,18 @@ class CropTool(tk.Toplevel):
     def _sel_is_valid(self) -> bool:
         if self._sel is None:
             return False
-        if self._sel["shape"] == "box":
-            return (self._sel["x2"]-self._sel["x1"] >= MIN_SELECTION and
-                    self._sel["y2"]-self._sel["y1"] >= MIN_SELECTION)
-        return self._sel["r"] >= MIN_SELECTION // 2
+        return (self._sel["x2"] - self._sel["x1"] >= MIN_SELECTION and
+                self._sel["y2"] - self._sel["y1"] >= MIN_SELECTION)
 
     def _get_crop_image(self) -> Optional[np.ndarray]:
         if self._frame is None or self._sel is None:
             return None
-        s = self._sel
         fh, fw = self._frame.shape[:2]
-        if s["shape"] == "box":
-            x1,y1 = max(0,s["x1"]), max(0,s["y1"])
-            x2,y2 = min(fw,s["x2"]), min(fh,s["y2"])
-            return self._frame[y1:y2, x1:x2].copy()
-        else:
-            r, cx, cy = s["r"], s["cx"], s["cy"]
-            x1,y1 = max(0,cx-r), max(0,cy-r)
-            x2,y2 = min(fw,cx+r), min(fh,cy+r)
-            crop = self._frame[y1:y2, x1:x2].copy()
-            ch2, cw2 = crop.shape[:2]
-            mask = np.zeros((ch2,cw2), dtype=np.uint8)
-            cv2.circle(mask, (cx-x1, cy-y1), r, 255, -1)
-            result = crop.copy()
-            result[mask==0] = 0
-            return result
+        x1 = max(0, self._sel["x1"])
+        y1 = max(0, self._sel["y1"])
+        x2 = min(fw, self._sel["x2"])
+        y2 = min(fh, self._sel["y2"])
+        return self._frame[y1:y2, x1:x2].copy()
 
     # ------------------------------------------------------------------
     # Save
@@ -708,11 +680,13 @@ class CropTool(tk.Toplevel):
 
     def _save(self) -> None:
         if not self._sel_is_valid():
-            messagebox.showwarning("No selection", "Draw a crop region first.", parent=self)
+            messagebox.showwarning("No selection",
+                                   "Draw a crop region first.", parent=self)
             return
         crop = self._get_crop_image()
         if crop is None:
-            messagebox.showerror("Error", "Could not extract crop image.", parent=self)
+            messagebox.showerror("Error",
+                                 "Could not extract crop image.", parent=self)
             return
 
         root = project_root()
@@ -722,7 +696,8 @@ class CropTool(tk.Toplevel):
         save_path = detector_dir / filename
 
         if not cv2.imwrite(str(save_path), crop):
-            messagebox.showerror("Save failed", f"Could not write to:\n{save_path}", parent=self)
+            messagebox.showerror("Save failed",
+                                 f"Could not write to:\n{save_path}", parent=self)
             return
 
         devices = load_devices()
@@ -733,21 +708,25 @@ class CropTool(tk.Toplevel):
 
         cfg.detector_assignments[self._detector_name] = DetectorAssignment(
             image_filename=filename,
-            shape=self._sel["shape"],
             last_tested=datetime.now(timezone.utc).isoformat(),
             last_score=None,
             tap_offset_x=self._tap_offset[0] if self._tap_offset else None,
             tap_offset_y=self._tap_offset[1] if self._tap_offset else None,
+            cached_tap_x=None,   # cleared on new image assign
+            cached_tap_y=None,
         )
         save_devices(devices)
 
         if self._manager is not None:
             self._manager.invalidate_template(self._detector_name, self._serial)
 
-        app_logger.log(f"[crop_tool] Saved {self._detector_name} for {self._serial[:8]} → {filename}", "INFO")
+        app_logger.log(
+            f"[crop_tool] Saved {self._detector_name} for "
+            f"{self._serial[:8]} → {filename}", "INFO")
         self._set_status(f"Saved → {save_path.name}", color="#16a34a")
         self.after(1200, self.destroy)
 
-    def _set_status(self, msg: str, error: bool = False, color: Optional[str] = None) -> None:
+    def _set_status(self, msg: str, error: bool = False,
+                    color: Optional[str] = None) -> None:
         c = color if color else ("#dc2626" if error else "#888")
         self._status_label.config(text=msg, foreground=c)

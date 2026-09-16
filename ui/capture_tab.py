@@ -14,7 +14,8 @@ Test: captures a fresh frame from the device, runs template match against
 the selected image, shows the score. Does not save anything.
 
 Assign: saves the currently selected image as the assignment for this
-device+detector in devices.json.
+device+detector in devices.json. Clears cached_tap_x/y so the worker
+rediscovers the tap coordinate from the new image on next use.
 """
 
 from __future__ import annotations
@@ -22,7 +23,6 @@ from __future__ import annotations
 import subprocess
 import threading
 import tkinter as tk
-from dataclasses import replace
 from datetime import datetime, timezone
 from tkinter import ttk, messagebox
 from typing import Callable
@@ -35,7 +35,6 @@ from config.devices import DeviceConfig, load_devices, save_devices, DetectorAss
 from config.paths import project_root, adb_exe
 from config.constants import ADB_SCREENCAP_TIMEOUT_S, DETECTION_THRESHOLD
 
-# Core game states
 DETECTOR_NAMES = [
     # Game states
     "disconnected",
@@ -59,9 +58,9 @@ DETECTOR_NAMES = [
     "private_server_entry",
 ]
 
-_DOT_DEVICE = "#16a34a"
-_DOT_OTHER  = "#2563eb"
-_DOT_UNSET  = "#9ca3af"
+_DOT_DEVICE    = "#16a34a"
+_DOT_OTHER     = "#2563eb"
+_DOT_UNSET     = "#9ca3af"
 _LEGEND_DOT_BG = "#1e1e1e"
 
 
@@ -93,22 +92,24 @@ class CaptureTab(ttk.Frame):
         self._device_combo = ttk.Combobox(
             top, textvariable=self._selected_serial, state="readonly", width=28)
         self._device_combo.pack(side="left", padx=(0, 12))
-        self._device_combo.bind("<<ComboboxSelected>>", lambda e: self._on_selection_change())
+        self._device_combo.bind("<<ComboboxSelected>>",
+                                lambda e: self._on_selection_change())
 
         ttk.Label(top, text="Detector:").pack(side="left", padx=(0, 6))
         detector_combo = ttk.Combobox(
             top, textvariable=self._selected_detector,
             values=DETECTOR_NAMES, state="readonly", width=24)
         detector_combo.pack(side="left", padx=(0, 12))
-        detector_combo.bind("<<ComboboxSelected>>", lambda e: self._on_selection_change())
+        detector_combo.bind("<<ComboboxSelected>>",
+                            lambda e: self._on_selection_change())
 
-        ttk.Button(top, text="Open crop tool", command=self._launch_crop_tool).pack(side="left")
-        ttk.Button(top, text="Refresh", command=self._refresh_device_list).pack(
-            side="left", padx=(6, 0))
+        ttk.Button(top, text="Open crop tool",
+                   command=self._launch_crop_tool).pack(side="left")
+        ttk.Button(top, text="Refresh",
+                   command=self._refresh_device_list).pack(side="left", padx=(6, 0))
 
         ttk.Separator(self, orient="horizontal").pack(fill="x", padx=12, pady=4)
 
-        # Preview
         preview_outer = ttk.Frame(self, padding=(12, 4))
         preview_outer.pack(fill="x")
         self._preview_canvas = tk.Canvas(
@@ -116,10 +117,10 @@ class CaptureTab(ttk.Frame):
             highlightthickness=1, highlightbackground="#374151")
         self._preview_canvas.pack(fill="x")
         self._preview_canvas.create_text(
-            300, 60, text="Select a device and detector, then open the crop tool.",
+            300, 60,
+            text="Select a device and detector, then open the crop tool.",
             fill="#6b7280", font=("", 10), width=400, justify="center")
 
-        # Legend
         legend_frame = ttk.Frame(self, padding=(12, 4))
         legend_frame.pack(fill="x")
         for color, label in [
@@ -136,7 +137,6 @@ class CaptureTab(ttk.Frame):
 
         ttk.Separator(self, orient="horizontal").pack(fill="x", padx=12, pady=4)
 
-        # Column headers
         hdr = ttk.Frame(self, padding=(12, 0))
         hdr.pack(fill="x")
         ttk.Label(hdr, text=" ", width=2).pack(side="left")
@@ -151,7 +151,6 @@ class CaptureTab(ttk.Frame):
         ttk.Label(hdr, text="Assigned", width=22, foreground="#6b7280",
                   font=("", 9)).pack(side="left", padx=(6, 0))
 
-        # Scrollable detector list
         container = ttk.Frame(self)
         container.pack(fill="both", expand=True)
         canvas = tk.Canvas(container, highlightthickness=0)
@@ -259,12 +258,13 @@ class CaptureTab(ttk.Frame):
                         cfg: DeviceConfig | None) -> None:
         self._preview_canvas.delete("all")
         root = project_root()
-        device_path = root / "assets" / "detectors" / detector / f"{detector}_{serial}.png"
+        device_path = (root / "assets" / "detectors" / detector
+                       / f"{detector}_{serial}.png")
         assigned_path = None
         if cfg and detector in cfg.detector_assignments:
             fname = cfg.detector_assignments[detector].image_filename
             if fname:
-                assigned_path = root / "assets" / "detectors" / detector / fname
+                assigned_path = (root / "assets" / "detectors" / detector / fname)
 
         for p in [device_path, assigned_path]:
             if p and p.exists():
@@ -301,7 +301,8 @@ class CaptureTab(ttk.Frame):
             score_lbl = widgets["score_lbl"]
             tap_lbl   = widgets["tap_lbl"]
 
-            device_path  = root / "assets" / "detectors" / name / f"{name}_{serial}.png"
+            device_path  = (root / "assets" / "detectors" / name
+                            / f"{name}_{serial}.png")
             detector_dir = root / "assets" / "detectors" / name
             any_exists   = detector_dir.exists() and any(detector_dir.glob("*.png"))
             assignment   = cfg.detector_assignments.get(name) if cfg else None
@@ -347,8 +348,7 @@ class CaptureTab(ttk.Frame):
             if assigned_lbl:
                 if assignment and assignment.image_filename:
                     assigned_lbl.config(
-                        text=assignment.image_filename,
-                        foreground="#16a34a")
+                        text=assignment.image_filename, foreground="#16a34a")
                 else:
                     assigned_lbl.config(text="not assigned", foreground="#9ca3af")
 
@@ -375,8 +375,8 @@ class CaptureTab(ttk.Frame):
                 "Use the crop tool to capture one first.", parent=self)
             return
 
-        image_path = (project_root() / "assets" / "detectors" /
-                      detector_name / selected_image)
+        image_path = (project_root() / "assets" / "detectors"
+                      / detector_name / selected_image)
         if not image_path.exists():
             messagebox.showerror("Image missing",
                 f"Image file not found:\n{image_path}", parent=self)
@@ -395,32 +395,29 @@ class CaptureTab(ttk.Frame):
                     self.after(0, lambda: self._test_done(
                         detector_name, None, "Screencap failed"))
                     return
-
                 arr = np.frombuffer(result.stdout, dtype=np.uint8)
                 frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
                 if frame is None:
                     self.after(0, lambda: self._test_done(
                         detector_name, None, "Could not decode frame"))
                     return
-
                 template = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
                 if template is None:
                     self.after(0, lambda: self._test_done(
                         detector_name, None, "Could not load template image"))
                     return
-
                 fh, fw = frame.shape[:2]
                 th, tw = template.shape[:2]
                 if th > fh or tw > fw:
                     self.after(0, lambda: self._test_done(
                         detector_name, None, "Template larger than frame"))
                     return
-
-                match_result = cv2.matchTemplate(frame, template, cv2.TM_CCOEFF_NORMED)
+                match_result = cv2.matchTemplate(
+                    frame, template, cv2.TM_CCOEFF_NORMED)
                 _, max_val, _, _ = cv2.minMaxLoc(match_result)
                 score = float(max_val)
-                self.after(0, lambda s=score: self._test_done(detector_name, s, None))
-
+                self.after(0, lambda s=score: self._test_done(
+                    detector_name, s, None))
             except Exception as e:
                 self.after(0, lambda: self._test_done(
                     detector_name, None, str(e)))
@@ -431,18 +428,14 @@ class CaptureTab(ttk.Frame):
                    score: float | None, error: str | None) -> None:
         widgets = self._detector_rows[detector_name]
         widgets["test_btn"].config(state="normal", text="Test")
-
         if error:
             widgets["score_lbl"].config(text="err", foreground="#dc2626")
             messagebox.showerror("Test failed", error, parent=self)
             return
-
         if score >= DETECTION_THRESHOLD:
-            widgets["score_lbl"].config(
-                text=f"{score:.2f}", foreground="#16a34a")
+            widgets["score_lbl"].config(text=f"{score:.2f}", foreground="#16a34a")
         else:
-            widgets["score_lbl"].config(
-                text=f"{score:.2f}", foreground="#d97706")
+            widgets["score_lbl"].config(text=f"{score:.2f}", foreground="#d97706")
 
     # ------------------------------------------------------------------
     # Assign
@@ -475,14 +468,20 @@ class CaptureTab(ttk.Frame):
             return
 
         existing = cfg.detector_assignments.get(detector_name)
+
+        # Preserve tap_offset if the image hasn't changed; clear it if it has.
+        # Always clear cached_tap_x/y — new image means new position to discover.
+        same_image = (existing and existing.image_filename == selected_image)
         new_assignment = DetectorAssignment(
             image_filename=selected_image,
-            shape=existing.shape if existing else "box",
-            last_tested=datetime.now(timezone.utc).isoformat() if score is not None else (
-                existing.last_tested if existing else None),
+            last_tested=(datetime.now(timezone.utc).isoformat()
+                         if score is not None
+                         else (existing.last_tested if existing else None)),
             last_score=score,
-            tap_offset_x=existing.tap_offset_x if existing else None,
-            tap_offset_y=existing.tap_offset_y if existing else None,
+            tap_offset_x=existing.tap_offset_x if (existing and same_image) else None,
+            tap_offset_y=existing.tap_offset_y if (existing and same_image) else None,
+            cached_tap_x=None,   # always cleared — worker rediscovers on next use
+            cached_tap_y=None,
         )
         cfg.detector_assignments[detector_name] = new_assignment
         save_devices(devices)
@@ -512,12 +511,10 @@ class CaptureTab(ttk.Frame):
         serial = self._current_serial()
         if not serial:
             return
-
         devices = self._get_devices()
         cfg = devices.get(serial)
         if cfg is None:
             return
-
         if detector_name not in cfg.detector_assignments:
             return
 
@@ -532,7 +529,8 @@ class CaptureTab(ttk.Frame):
         widgets["tap_lbl"].config(text="")
 
         root = project_root()
-        device_path = root / "assets" / "detectors" / detector_name / f"{detector_name}_{serial}.png"
+        device_path = (root / "assets" / "detectors" / detector_name
+                       / f"{detector_name}_{serial}.png")
         detector_dir = root / "assets" / "detectors" / detector_name
         any_exists = detector_dir.exists() and any(detector_dir.glob("*.png"))
 

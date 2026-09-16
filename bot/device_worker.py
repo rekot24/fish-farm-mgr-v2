@@ -5,7 +5,7 @@ The main loop for a single device. One DeviceWorker per connected phone.
 
 Consecutive ADB failure detection:
   The worker tracks how many times in a row ADB returns "device not found"
-  (checked via _is_roblox_foreground / _is_roblox_running each cycle).
+  (checked via _check_roblox_foreground / _check_roblox_running each cycle).
   Any successful ADB contact resets the counter to zero. If the counter
   reaches settings.adb_failure_threshold consecutive failures, the worker
   stops itself cleanly. The card shows as stopped on the main tab and must
@@ -14,6 +14,17 @@ Consecutive ADB failure detection:
   "Consecutive" is the key constraint — isolated blips during normal
   operation will not accumulate toward the threshold across cycles that
   otherwise succeed.
+
+Tap coordinate resolution (_resolve_tap_coords):
+  1. tap_offset_x/y set on the DetectorAssignment (manual override via
+     crop tool amber dot) → use it always, no detection needed.
+  2. cached_tap_x/y set on the DetectorAssignment (persisted from a prior
+     session's first successful match) → use it, no detection needed.
+  3. Neither set → run template match, store the result as cached_tap_x/y
+     in devices.json, use it. Subsequent calls skip detection entirely.
+
+  Cache is cleared automatically when a new image is assigned in the
+  capture tab (_assign_detector sets cached_tap_x/y to None).
 
 Rejoin navigation is fully state-driven — no Chrome URL, no hardcoded sleeps.
 Each detected state triggers one action that advances to the next state.
@@ -54,7 +65,7 @@ from bot.actions import (
 )
 from capture.base import CaptureBackend
 from config.constants import DETECTION_THRESHOLD
-from config.devices import DeviceConfig
+from config.devices import DeviceConfig, save_devices
 from config.settings import Settings
 from detection.detector import run_detector_by_name
 from detection.template_bank import TemplateBank
@@ -90,12 +101,14 @@ class DeviceWorker:
         template_bank: TemplateBank,
         get_settings: Callable[[], Settings],
         get_device_cfg: Callable[[], DeviceConfig],
+        get_all_devices: Callable[[], dict],
     ):
         self._serial = device_cfg.serial
         self._capture = capture_backend
         self._bank = template_bank
         self._get_settings = get_settings
         self._get_device_cfg = get_device_cfg
+        self._get_all_devices = get_all_devices
 
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -203,11 +216,9 @@ class DeviceWorker:
                     foreground_result = self._check_roblox_foreground()
 
                     if foreground_result == _DEVICE_NOT_FOUND:
-                        # ADB cannot see the device at all
                         if self._handle_adb_failure(settings):
-                            return  # worker stopped itself
+                            return
                     else:
-                        # ADB contact succeeded — reset failure counter
                         self._consecutive_adb_failures = 0
                         if not foreground_result:
                             running_result = self._check_roblox_running()
@@ -231,7 +242,6 @@ class DeviceWorker:
                     time.sleep(settings.loop_interval_s)
                     continue
 
-                # Frame captured — ADB contact is good, reset failure counter
                 self._consecutive_adb_failures = 0
                 self._last_frame = frame
                 detected_state = self._resolve_state(frame, cfg, settings)
@@ -251,13 +261,6 @@ class DeviceWorker:
     # ------------------------------------------------------------------
 
     def _handle_adb_failure(self, settings: Settings) -> bool:
-        """
-        Increment the consecutive failure counter. If threshold is reached,
-        stop the worker and return True. Otherwise return False.
-
-        Only called on confirmed "device not found" — not on other ADB errors.
-        Any successful ADB contact resets the counter before this is called.
-        """
         self._consecutive_adb_failures += 1
         threshold = settings.adb_failure_threshold
         self._log(
@@ -271,7 +274,6 @@ class DeviceWorker:
                 f"stopping worker. Restart manually when device is back.",
                 "ERROR",
             )
-            # Stop on a background thread to avoid join deadlock
             threading.Thread(target=self.stop, daemon=True).start()
             return True
         return False
@@ -308,7 +310,6 @@ class DeviceWorker:
 
         foreground_result = self._check_roblox_foreground()
         if foreground_result == _DEVICE_NOT_FOUND:
-            # Don't increment here — the frame loop already handles it
             pass
         elif not foreground_result:
             running_result = self._check_roblox_running()
@@ -403,11 +404,9 @@ class DeviceWorker:
         self._unknown_entered_at = None
         self._reset_lobby_timer()
         now = time.monotonic()
-
         if cfg.auto_farm_enabled:
             if now - self._last_auto_farm_tap >= cfg.auto_farm_interval_s:
                 self._do_auto_farm_double_click(cfg, settings)
-
         if cfg.end_run_enabled:
             if now - self._last_end_run_tap >= cfg.end_run_interval_s:
                 self._do_end_run(cfg, settings)
@@ -416,22 +415,18 @@ class DeviceWorker:
         self._pause_auto_farm_timer()
         self._reset_end_run_timer()
         now = time.monotonic()
-
         if self._lobby_entered_at is None:
             self._lobby_entered_at = now
             self._log("Entered lobby — starting lobby timer", "INFO")
-
         if cfg.auto_farm_enabled:
             if self._check_secondary(states.AUTO_FARM_OFF, cfg, settings):
                 self._log("Auto-farm is OFF in lobby — tapping to re-enable", "INFO")
                 self._do_auto_farm_tap(cfg, settings)
-
         if cfg.stuck_lobby_detection_enabled:
             time_in_lobby = now - self._lobby_entered_at
             if time_in_lobby >= settings.lobby_stuck_threshold_s:
-                self._log(
-                    f"Stuck in lobby for {time_in_lobby:.0f}s — firing end-run tap",
-                    "WARNING")
+                self._log(f"Stuck in lobby for {time_in_lobby:.0f}s — firing end-run tap",
+                          "WARNING")
                 self._do_end_run(cfg, settings)
                 self._reset_lobby_timer()
                 self._set_last_action("End-run tap (stuck in lobby)")
@@ -441,12 +436,10 @@ class DeviceWorker:
         if self._unknown_entered_at is None:
             self._unknown_entered_at = now
             return
-
         time_unknown = now - self._unknown_entered_at
         if time_unknown >= settings.unknown_stuck_threshold_s:
-            self._log(
-                f"Stuck in UNKNOWN for {time_unknown:.0f}s — force-stopping and relaunching",
-                "WARNING")
+            self._log(f"Stuck in UNKNOWN for {time_unknown:.0f}s — force-stopping and relaunching",
+                      "WARNING")
             self._unknown_entered_at = None
             force_stop_roblox(self._serial)
             launch_roblox(self._serial)
@@ -478,22 +471,19 @@ class DeviceWorker:
         self._reset_lobby_timer()
         self._pause_auto_farm_timer()
         self._reset_end_run_timer()
-
         coords = self._resolve_tap_coords(cfg, ["24rolla_avatar"])
         if coords:
             self._log("24rolla visible on home screen — tapping avatar (fast path)", "INFO")
             tap(self._serial, coords[0], coords[1])
             self._set_last_action("Tapped 24rolla avatar (fast path)")
             return
-
         coords = self._resolve_tap_coords(cfg, [states.HAMBURGER_MENU_OPEN])
         if coords:
             self._log("24rolla not visible — tapping hamburger menu (fallback path)", "INFO")
             tap(self._serial, coords[0], coords[1])
             self._set_last_action("Tapped hamburger menu (fallback path)")
         else:
-            self._log("Neither 24rolla_avatar nor hamburger_menu found on home screen",
-                      "WARNING")
+            self._log("Neither 24rolla_avatar nor hamburger_menu found on home screen", "WARNING")
 
     def _handle_friend_card(self, cfg: DeviceConfig, settings: Settings) -> None:
         self._unknown_entered_at = None
@@ -561,9 +551,8 @@ class DeviceWorker:
         coords = self._resolve_tap_coords(
             cfg, [states.AUTO_FARM_ON, states.AUTO_FARM_OFF])
         if coords is None:
-            self._log(
-                "Auto-farm: no assignment found for auto_farm_on or auto_farm_off",
-                "WARNING")
+            self._log("Auto-farm: no assignment found for auto_farm_on or auto_farm_off",
+                      "WARNING")
             return
         self._log("Auto-farm interval elapsed — double-clicking", "INFO")
         double_tap(self._serial, coords[0], coords[1],
@@ -592,8 +581,7 @@ class DeviceWorker:
     def _do_leave_tap(self, cfg: DeviceConfig) -> None:
         coords = self._resolve_tap_coords(cfg, [states.DISCONNECTED])
         if coords is None:
-            self._log(
-                "Leave: no tap offset assigned for disconnected detector", "WARNING")
+            self._log("Leave: no tap offset assigned for disconnected detector", "WARNING")
             return
         tap(self._serial, coords[0], coords[1])
         self._set_last_action("Tapped Leave")
@@ -603,12 +591,59 @@ class DeviceWorker:
         cfg: DeviceConfig,
         detector_names: list[str],
     ) -> Optional[tuple[int, int]]:
-        if self._last_frame is None:
-            return None
+        """
+        Resolve tap coordinates for the first matching detector in detector_names.
+
+        Priority:
+          1. tap_offset_x/y on the assignment — manual override, always wins.
+             Computes offset from bbox top-left, no detection needed once cached.
+          2. cached_tap_x/y on the assignment — persisted screen coord from a
+             prior match. Skip detection entirely, use directly.
+          3. Neither set — run template match, store result as cached_tap_x/y
+             in devices.json, return the coordinate.
+
+        Detection is only ever run when the cache is cold (first use, or after
+        a new image is assigned which clears cached_tap_x/y).
+        """
         device_overrides = list(cfg.detector_assignments.keys())
+
         for name in detector_names:
             detector_key = states.to_detector_name(name)
             if detector_key not in device_overrides:
+                continue
+
+            assignment = cfg.detector_assignments.get(detector_key)
+            if assignment is None:
+                continue
+
+            # Priority 1: manual tap override
+            if assignment.tap_offset_x is not None:
+                # Still need bbox to apply the offset — run detection
+                if self._last_frame is None:
+                    continue
+                result = run_detector_by_name(
+                    detector_name=detector_key,
+                    frame_bgr=self._last_frame,
+                    device_serial=self._serial,
+                    device_overrides=device_overrides,
+                    bank=self._bank,
+                    threshold=DETECTION_THRESHOLD,
+                )
+                if result.found and result.bbox:
+                    return (result.bbox[0] + assignment.tap_offset_x,
+                            result.bbox[1] + assignment.tap_offset_y)
+                continue
+
+            # Priority 2: persistent cache — skip detection
+            if assignment.cached_tap_x is not None:
+                self._log(
+                    f"[tap_cache] HIT {detector_key} → "
+                    f"({assignment.cached_tap_x}, {assignment.cached_tap_y})",
+                    "DEBUG")
+                return (assignment.cached_tap_x, assignment.cached_tap_y)
+
+            # Priority 3: cache cold — run detection, store result
+            if self._last_frame is None:
                 continue
             result = run_detector_by_name(
                 detector_name=detector_key,
@@ -619,13 +654,20 @@ class DeviceWorker:
                 threshold=DETECTION_THRESHOLD,
             )
             if result.found and result.center:
-                assignment = cfg.detector_assignments.get(detector_key)
-                if assignment and assignment.tap_offset_x is not None:
-                    bbox_x = result.bbox[0] if result.bbox else result.center[0]
-                    bbox_y = result.bbox[1] if result.bbox else result.center[1]
-                    return (bbox_x + assignment.tap_offset_x,
-                            bbox_y + assignment.tap_offset_y)
-                return result.center
+                x, y = result.center
+                assignment.cached_tap_x = x
+                assignment.cached_tap_y = y
+                # Persist to devices.json so future sessions skip detection
+                try:
+                    all_devices = self._get_all_devices()
+                    save_devices(all_devices)
+                    self._log(
+                        f"[tap_cache] STORED {detector_key} → ({x}, {y})", "INFO")
+                except Exception as e:
+                    self._log(
+                        f"[tap_cache] Failed to persist {detector_key}: {e}", "WARNING")
+                return (x, y)
+
         return None
 
     # ------------------------------------------------------------------
@@ -647,12 +689,6 @@ class DeviceWorker:
     # ------------------------------------------------------------------
 
     def _check_roblox_foreground(self):
-        """
-        Returns:
-          True  — Roblox is the foreground app
-          False — ADB reachable but Roblox is not foreground
-          _DEVICE_NOT_FOUND — device serial not found by ADB
-        """
         try:
             from config.paths import adb_exe
             result = subprocess.run(
@@ -664,7 +700,6 @@ class DeviceWorker:
             if "device not found" in stderr or "device not found" in \
                result.stdout.decode("utf-8", errors="replace"):
                 return _DEVICE_NOT_FOUND
-
             output = result.stdout.decode("utf-8", errors="replace")
             for line in output.splitlines():
                 if "mResumedActivity" in line or "ResumedActivity" in line:
@@ -681,12 +716,6 @@ class DeviceWorker:
             return False
 
     def _check_roblox_running(self):
-        """
-        Returns:
-          True  — Roblox process exists (running or backgrounded)
-          False — ADB reachable, Roblox process not found
-          _DEVICE_NOT_FOUND — device serial not found by ADB
-        """
         try:
             from config.paths import adb_exe
             result = subprocess.run(
