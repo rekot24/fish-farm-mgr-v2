@@ -6,11 +6,12 @@ All paths are resolved relative to the project root (the folder containing
 main.py), regardless of the process's current working directory.
 
 Bundled tool paths:
-  adb_exe()           → tools/adb/adb.exe
+  adb_exe()           → tools/adb/adb.exe  (Windows)
+                      → adb                (Linux / macOS — expected on PATH)
   scrcpy_jar_path()   → tools/scrcpy/scrcpy-server.jar
 
-All ADB calls throughout the codebase use adb_exe() — never the string
-"adb" — so the app works without ADB on the system PATH.
+All ADB calls throughout the codebase use adb_exe() — never the bare
+string "adb" or "adb.exe" — so the correct binary is used on all platforms.
 """
 
 from __future__ import annotations
@@ -65,12 +66,16 @@ def errors_log_path() -> Path:
 
 def adb_exe() -> str:
     """
-    Returns the path to the bundled adb.exe as a string.
-    Always use this instead of the bare string "adb" so the app works
-    without ADB installed on the system PATH.
+    Returns the path to ADB as a string, platform-aware.
+
+    Windows: uses the bundled tools/adb/adb.exe so ADB does not need to be
+             on the system PATH.
+    Linux / macOS: returns the bare "adb" command, expected on the system
+             PATH (installed via package manager or Android SDK).
     """
-    exe = project_root() / "tools" / "adb" / "adb.exe"
-    return str(exe)
+    if sys.platform == "win32":
+        return str(project_root() / "tools" / "adb" / "adb.exe")
+    return "adb"
 
 
 def scrcpy_jar_path() -> Path:
