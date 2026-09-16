@@ -290,14 +290,16 @@ class DeviceWorker:
     # ------------------------------------------------------------------
 
     def _resolve_state(self, frame, cfg: DeviceConfig, settings: Settings) -> str:
-        device_overrides = list(cfg.detector_assignments.keys())
+        # Pass the full detector_assignments dict so the bank can look up
+        # which image file is assigned to each detector for this device.
+        detector_assignments = cfg.detector_assignments
 
         for detector_name in _DETECTOR_PRIORITY:
             result = run_detector_by_name(
                 detector_name=states.to_detector_name(detector_name),
                 frame_bgr=frame,
                 device_serial=self._serial,
-                device_overrides=device_overrides,
+                detector_assignments=detector_assignments,
                 bank=self._bank,
                 threshold=DETECTION_THRESHOLD,
             )
@@ -339,13 +341,12 @@ class DeviceWorker:
                           settings: Settings) -> bool:
         if self._last_frame is None:
             return False
-        device_overrides = list(cfg.detector_assignments.keys())
         detector_key = states.to_detector_name(detector_name)
         result = run_detector_by_name(
             detector_name=detector_key,
             frame_bgr=self._last_frame,
             device_serial=self._serial,
-            device_overrides=device_overrides,
+            detector_assignments=cfg.detector_assignments,
             bank=self._bank,
             threshold=DETECTION_THRESHOLD,
         )
@@ -610,14 +611,13 @@ class DeviceWorker:
           2. cached_tap_x/y — persisted screen coord. No detection needed.
           3. Neither set — run template match, persist to devices.json, use result.
         """
-        device_overrides = list(cfg.detector_assignments.keys())
+        # Pass the full detector_assignments dict so the bank can look up
+        # which image file is assigned to each detector for this device.
+        detector_assignments = cfg.detector_assignments
 
         for name in detector_names:
             detector_key = states.to_detector_name(name)
-            if detector_key not in device_overrides:
-                continue
-
-            assignment = cfg.detector_assignments.get(detector_key)
+            assignment = detector_assignments.get(detector_key)
             if assignment is None:
                 continue
 
@@ -629,7 +629,7 @@ class DeviceWorker:
                     detector_name=detector_key,
                     frame_bgr=self._last_frame,
                     device_serial=self._serial,
-                    device_overrides=device_overrides,
+                    detector_assignments=detector_assignments,
                     bank=self._bank,
                     threshold=DETECTION_THRESHOLD,
                 )
@@ -653,7 +653,7 @@ class DeviceWorker:
                 detector_name=detector_key,
                 frame_bgr=self._last_frame,
                 device_serial=self._serial,
-                device_overrides=device_overrides,
+                detector_assignments=detector_assignments,
                 bank=self._bank,
                 threshold=DETECTION_THRESHOLD,
             )

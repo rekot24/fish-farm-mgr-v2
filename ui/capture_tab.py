@@ -11,7 +11,8 @@ Image dropdown: lists all available .png files for that detector across
 all devices. Defaults to the currently assigned image.
 
 Test: captures a fresh frame from the device, runs template match against
-the selected image, shows the score. Does not save anything.
+the assigned image (same image the live bot loop uses). If no image is
+assigned yet, falls back to the dropdown selection. Does not save anything.
 
 Assign: saves the currently selected image as the assignment for this
 device+detector in devices.json. Clears cached_tap_x/y so the worker
@@ -361,27 +362,62 @@ class CaptureTab(ttk.Frame):
     # Test
     # ------------------------------------------------------------------
 
+    def _resolve_test_image_path(self, detector_name: str, serial: str) -> tuple[str | None, str]:
+        """
+        Resolve which image file the Test button should use.
+
+        Mirrors the live bot loop's image resolution exactly:
+          1. Use image_filename from devices.json detector_assignments (assigned via UI)
+          2. Fall back to the dropdown selection
+
+        Returns (path_str_or_None, source_label) where source_label is for
+        the warning message if the path doesn't exist.
+        """
+        root = project_root()
+        devices = self._get_devices()
+        cfg = devices.get(serial)
+
+        # Priority 1: assigned image from devices.json (same as live loop)
+        if cfg:
+            assignment = cfg.detector_assignments.get(detector_name)
+            if assignment and assignment.image_filename:
+                path = root / "assets" / "detectors" / detector_name / assignment.image_filename
+                return str(path), f"assigned ({assignment.image_filename})"
+
+        # Priority 2: dropdown selection (fallback for unassigned detectors)
+        widgets = self._detector_rows[detector_name]
+        selected_image = widgets["img_var"].get()
+        if selected_image and selected_image != "—":
+            path = root / "assets" / "detectors" / detector_name / selected_image
+            return str(path), f"dropdown ({selected_image})"
+
+        return None, "no image"
+
     def _test_detector(self, detector_name: str) -> None:
         serial = self._current_serial()
         if not serial:
             messagebox.showinfo("No device", "Select a device first.", parent=self)
             return
 
-        widgets = self._detector_rows[detector_name]
-        selected_image = widgets["img_var"].get()
-        if not selected_image or selected_image == "—":
-            messagebox.showinfo("No image",
-                f"No image selected for '{detector_name}'.\n"
+        image_path_str, source_label = self._resolve_test_image_path(
+            detector_name, serial)
+
+        if image_path_str is None:
+            messagebox.showinfo(
+                "No image",
+                f"No image configured for '{detector_name}'.\n"
                 "Use the crop tool to capture one first.", parent=self)
             return
 
-        image_path = (project_root() / "assets" / "detectors"
-                      / detector_name / selected_image)
+        from pathlib import Path
+        image_path = Path(image_path_str)
         if not image_path.exists():
-            messagebox.showerror("Image missing",
-                f"Image file not found:\n{image_path}", parent=self)
+            messagebox.showerror(
+                "Image missing",
+                f"Image file not found ({source_label}):\n{image_path}", parent=self)
             return
 
+        widgets = self._detector_rows[detector_name]
         widgets["test_btn"].config(state="disabled", text="…")
         widgets["score_lbl"].config(text="…", foreground="#9ca3af")
 
@@ -416,6 +452,12 @@ class CaptureTab(ttk.Frame):
                     frame, template, cv2.TM_CCOEFF_NORMED)
                 _, max_val, _, _ = cv2.minMaxLoc(match_result)
                 score = float(max_val)
+
+                # Invalidate the bank cache for this detector so the live loop
+                # picks up any changes on the next cycle.
+                if self._manager and hasattr(self._manager, "template_bank"):
+                    self._manager.template_bank.invalidate_detector(detector_name)
+
                 self.after(0, lambda s=score: self._test_done(
                     detector_name, s, None))
             except Exception as e:

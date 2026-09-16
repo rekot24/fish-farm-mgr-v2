@@ -51,22 +51,22 @@ class TemplateBank:
         self,
         detector_name: str,
         device_serial: str,
-        device_overrides: List[str],
+        detector_assignments: dict,
     ) -> np.ndarray:
         """
         Get the template image for a detector + device combination.
 
         Resolution order:
-          1. Check detector_assignments for this device — use the assigned
-             image filename if present.
+          1. Check detector_assignments for this device — use image_filename
+             from the assignment if present.
           2. Fall back to the image named after this device's serial.
           3. Raise FileNotFoundError if nothing is found.
 
         Args:
-            detector_name    : e.g. "in_tank"
-            device_serial    : ADB serial of the device
-            device_overrides : keys from DeviceConfig.detector_assignments
-                               (used to check if an assignment exists)
+            detector_name        : e.g. "in_tank"
+            device_serial        : ADB serial of the device
+            detector_assignments : DeviceConfig.detector_assignments dict
+                                   (maps detector_name -> DetectorAssignment)
 
         Returns:
             BGR numpy array of the template image.
@@ -74,7 +74,7 @@ class TemplateBank:
         Raises:
             FileNotFoundError if no image is configured for this detector.
         """
-        path = self.resolve_path(detector_name, device_serial, device_overrides)
+        path = self.resolve_path(detector_name, device_serial, detector_assignments)
         path_str = str(path)
         if path_str not in self._cache:
             self._cache[path_str] = self._load(path, detector_name, device_serial)
@@ -93,27 +93,28 @@ class TemplateBank:
         self,
         detector_name: str,
         device_serial: str,
-        device_overrides: List[str],
+        detector_assignments: dict,
     ) -> Path:
         """
         Return the Path that would be used for a detector + device.
 
-        Checks for the assigned filename in detector_assignments first,
+        Checks detector_assignments for an assigned image_filename first,
         then falls back to the device-serial-named file.
 
-        This is also used by the crop tool to know where to save a new image.
+        Args:
+            detector_name        : e.g. "friend_card"
+            device_serial        : ADB serial of the device
+            detector_assignments : DeviceConfig.detector_assignments dict
+                                   (maps detector_name -> DetectorAssignment)
         """
         detector_dir = self._detectors_dir / detector_name
 
-        # If this device has an assignment for this detector, use that filename
-        if detector_name in device_overrides:
-            # device_overrides here is just the list of detector names that
-            # have assignments — the actual filename lives in detector_assignments.
-            # The crop tool and device worker pass the assigned filename separately
-            # via get_assigned_path(). For the simple case, use the serial-named file.
-            pass
+        # Use the assigned image_filename if one has been set via the UI
+        assignment = detector_assignments.get(detector_name)
+        if assignment is not None and assignment.image_filename:
+            return detector_dir / assignment.image_filename
 
-        # Default: image named after the originating device serial
+        # Fallback: image named after the originating device serial
         return detector_dir / f"{detector_name}_{device_serial}.png"
 
     def get_assigned_path(
@@ -153,6 +154,17 @@ class TemplateBank:
     def invalidate_by_path(self, image_path: str) -> None:
         """Invalidate a path-addressed cache entry."""
         self._cache.pop(image_path, None)
+
+    def invalidate_detector(self, detector_name: str) -> None:
+        """
+        Remove all cached entries for a detector (any device's image).
+        Called after an assignment change so the next access loads the
+        correct newly-assigned file.
+        """
+        prefix = str(self._detectors_dir / detector_name) + "/"
+        stale = [k for k in self._cache if k.startswith(prefix)]
+        for k in stale:
+            del self._cache[k]
 
     def clear(self) -> None:
         """Clear the entire cache. All images reload on next access."""

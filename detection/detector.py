@@ -15,7 +15,7 @@ A per-detector click_offset in devices.json shifts it if needed.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -97,30 +97,32 @@ def run_detector_by_name(
     detector_name: str,
     frame_bgr: np.ndarray,
     device_serial: str,
-    device_overrides: List[str],
+    detector_assignments: dict,
     bank: TemplateBank,
     threshold: float = DETECTION_THRESHOLD,
 ) -> DetectResult:
     """
     Run a named detector against a frame using the TemplateBank.
 
-    This is the standard way workers run detectors. The bank handles
-    shared vs device-specific image resolution automatically.
+    This is the standard way workers run detectors. The bank resolves
+    which image file to load based on the detector_assignments for this
+    device — honouring whatever was assigned via the UI capture tab.
 
     Args:
-        detector_name   : e.g. "in_tank"
-        frame_bgr       : current device screen
-        device_serial   : ADB serial of the device
-        device_overrides: DeviceConfig.detector_assignments keys
-        bank            : shared TemplateBank instance
-        threshold       : match confidence threshold
+        detector_name       : e.g. "in_tank"
+        frame_bgr           : current device screen
+        device_serial       : ADB serial of the device
+        detector_assignments: DeviceConfig.detector_assignments dict
+                              (maps detector_name -> DetectorAssignment)
+        bank                : shared TemplateBank instance
+        threshold           : match confidence threshold
 
     Returns:
         DetectResult. Returns not_found gracefully if image is missing.
     """
     try:
-        templ = bank.get(detector_name, device_serial, device_overrides)
-        path = str(bank.resolve_path(detector_name, device_serial, device_overrides))
+        templ = bank.get(detector_name, device_serial, detector_assignments)
+        path = str(bank.resolve_path(detector_name, device_serial, detector_assignments))
         return find_in_frame(
             frame_bgr=frame_bgr,
             templates=[templ],
@@ -138,23 +140,32 @@ def run_all_detectors(
     detector_names: List[str],
     frame_bgr: np.ndarray,
     device_serial: str,
-    device_overrides: List[str],
+    detector_assignments: dict,
     bank: TemplateBank,
     threshold: float = DETECTION_THRESHOLD,
-) -> dict[str, DetectResult]:
+) -> Dict[str, DetectResult]:
     """
     Run all detectors in the list against a single frame.
 
     Returns a dict of detector_name -> DetectResult.
     Every detector in detector_names will have an entry, even if not found.
+
+    Args:
+        detector_names      : list of detector names to run
+        frame_bgr           : current device screen
+        device_serial       : ADB serial of the device
+        detector_assignments: DeviceConfig.detector_assignments dict
+                              (maps detector_name -> DetectorAssignment)
+        bank                : shared TemplateBank instance
+        threshold           : match confidence threshold
     """
-    results: dict[str, DetectResult] = {}
+    results: Dict[str, DetectResult] = {}
     for name in detector_names:
         results[name] = run_detector_by_name(
             detector_name=name,
             frame_bgr=frame_bgr,
             device_serial=device_serial,
-            device_overrides=device_overrides,
+            detector_assignments=detector_assignments,
             bank=bank,
             threshold=threshold,
         )
