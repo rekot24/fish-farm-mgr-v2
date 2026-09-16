@@ -17,11 +17,12 @@ Consecutive ADB failure detection:
 
 Tap coordinate resolution (_resolve_tap_coords):
   1. tap_offset_x/y set on the DetectorAssignment (manual override via
-     crop tool amber dot) → use it always, no detection needed.
+     crop tool amber dot) → use it always, runs detection for bbox origin.
   2. cached_tap_x/y set on the DetectorAssignment (persisted from a prior
      session's first successful match) → use it, no detection needed.
-  3. Neither set → run template match, store the result as cached_tap_x/y
-     in devices.json, use it. Subsequent calls skip detection entirely.
+  3. Neither set → run template match, store result as cached_tap_x/y in
+     devices.json via load_devices()/save_devices(), use it. Subsequent
+     calls skip detection entirely until a new image is assigned.
 
   Cache is cleared automatically when a new image is assigned in the
   capture tab (_assign_detector sets cached_tap_x/y to None).
@@ -65,7 +66,7 @@ from bot.actions import (
 )
 from capture.base import CaptureBackend
 from config.constants import DETECTION_THRESHOLD
-from config.devices import DeviceConfig, save_devices
+from config.devices import DeviceConfig, load_devices, save_devices
 from config.settings import Settings
 from detection.detector import run_detector_by_name
 from detection.template_bank import TemplateBank
@@ -101,14 +102,12 @@ class DeviceWorker:
         template_bank: TemplateBank,
         get_settings: Callable[[], Settings],
         get_device_cfg: Callable[[], DeviceConfig],
-        get_all_devices: Callable[[], dict],
     ):
         self._serial = device_cfg.serial
         self._capture = capture_backend
         self._bank = template_bank
         self._get_settings = get_settings
         self._get_device_cfg = get_device_cfg
-        self._get_all_devices = get_all_devices
 
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -425,8 +424,9 @@ class DeviceWorker:
         if cfg.stuck_lobby_detection_enabled:
             time_in_lobby = now - self._lobby_entered_at
             if time_in_lobby >= settings.lobby_stuck_threshold_s:
-                self._log(f"Stuck in lobby for {time_in_lobby:.0f}s — firing end-run tap",
-                          "WARNING")
+                self._log(
+                    f"Stuck in lobby for {time_in_lobby:.0f}s — firing end-run tap",
+                    "WARNING")
                 self._do_end_run(cfg, settings)
                 self._reset_lobby_timer()
                 self._set_last_action("End-run tap (stuck in lobby)")
@@ -438,8 +438,9 @@ class DeviceWorker:
             return
         time_unknown = now - self._unknown_entered_at
         if time_unknown >= settings.unknown_stuck_threshold_s:
-            self._log(f"Stuck in UNKNOWN for {time_unknown:.0f}s — force-stopping and relaunching",
-                      "WARNING")
+            self._log(
+                f"Stuck in UNKNOWN for {time_unknown:.0f}s — force-stopping and relaunching",
+                "WARNING")
             self._unknown_entered_at = None
             force_stop_roblox(self._serial)
             launch_roblox(self._serial)
@@ -483,7 +484,8 @@ class DeviceWorker:
             tap(self._serial, coords[0], coords[1])
             self._set_last_action("Tapped hamburger menu (fallback path)")
         else:
-            self._log("Neither 24rolla_avatar nor hamburger_menu found on home screen", "WARNING")
+            self._log("Neither 24rolla_avatar nor hamburger_menu found on home screen",
+                      "WARNING")
 
     def _handle_friend_card(self, cfg: DeviceConfig, settings: Settings) -> None:
         self._unknown_entered_at = None
@@ -551,8 +553,9 @@ class DeviceWorker:
         coords = self._resolve_tap_coords(
             cfg, [states.AUTO_FARM_ON, states.AUTO_FARM_OFF])
         if coords is None:
-            self._log("Auto-farm: no assignment found for auto_farm_on or auto_farm_off",
-                      "WARNING")
+            self._log(
+                "Auto-farm: no assignment found for auto_farm_on or auto_farm_off",
+                "WARNING")
             return
         self._log("Auto-farm interval elapsed — double-clicking", "INFO")
         double_tap(self._serial, coords[0], coords[1],
@@ -595,15 +598,13 @@ class DeviceWorker:
         Resolve tap coordinates for the first matching detector in detector_names.
 
         Priority:
-          1. tap_offset_x/y on the assignment — manual override, always wins.
-             Computes offset from bbox top-left, no detection needed once cached.
-          2. cached_tap_x/y on the assignment — persisted screen coord from a
-             prior match. Skip detection entirely, use directly.
-          3. Neither set — run template match, store result as cached_tap_x/y
-             in devices.json, return the coordinate.
-
-        Detection is only ever run when the cache is cold (first use, or after
-        a new image is assigned which clears cached_tap_x/y).
+          1. tap_offset_x/y set — manual override via crop tool amber dot.
+             Runs detection to get bbox origin, applies offset from there.
+          2. cached_tap_x/y set — persisted screen coord from a prior match.
+             No detection needed; use directly.
+          3. Neither set — run template match, persist result to devices.json,
+             update in-memory assignment, return coordinate.
+             All future calls skip detection until a new image is assigned.
         """
         device_overrides = list(cfg.detector_assignments.keys())
 
@@ -616,9 +617,8 @@ class DeviceWorker:
             if assignment is None:
                 continue
 
-            # Priority 1: manual tap override
+            # Priority 1: manual tap override — needs bbox, run detection
             if assignment.tap_offset_x is not None:
-                # Still need bbox to apply the offset — run detection
                 if self._last_frame is None:
                     continue
                 result = run_detector_by_name(
@@ -634,7 +634,7 @@ class DeviceWorker:
                             result.bbox[1] + assignment.tap_offset_y)
                 continue
 
-            # Priority 2: persistent cache — skip detection
+            # Priority 2: persistent cache — skip detection entirely
             if assignment.cached_tap_x is not None:
                 self._log(
                     f"[tap_cache] HIT {detector_key} → "
@@ -642,7 +642,7 @@ class DeviceWorker:
                     "DEBUG")
                 return (assignment.cached_tap_x, assignment.cached_tap_y)
 
-            # Priority 3: cache cold — run detection, store result
+            # Priority 3: cache cold — run detection, persist result
             if self._last_frame is None:
                 continue
             result = run_detector_by_name(
@@ -655,17 +655,26 @@ class DeviceWorker:
             )
             if result.found and result.center:
                 x, y = result.center
+
+                # Update in-memory assignment for this session
                 assignment.cached_tap_x = x
                 assignment.cached_tap_y = y
-                # Persist to devices.json so future sessions skip detection
+
+                # Persist to devices.json — load fresh to avoid overwriting
+                # changes made by other parts of the app since last save
                 try:
-                    all_devices = self._get_all_devices()
-                    save_devices(all_devices)
-                    self._log(
-                        f"[tap_cache] STORED {detector_key} → ({x}, {y})", "INFO")
+                    all_devices = load_devices()
+                    persisted = all_devices.get(self._serial)
+                    if persisted and detector_key in persisted.detector_assignments:
+                        persisted.detector_assignments[detector_key].cached_tap_x = x
+                        persisted.detector_assignments[detector_key].cached_tap_y = y
+                        save_devices(all_devices)
+                        self._log(
+                            f"[tap_cache] STORED {detector_key} → ({x}, {y})", "INFO")
                 except Exception as e:
                     self._log(
                         f"[tap_cache] Failed to persist {detector_key}: {e}", "WARNING")
+
                 return (x, y)
 
         return None
@@ -689,6 +698,12 @@ class DeviceWorker:
     # ------------------------------------------------------------------
 
     def _check_roblox_foreground(self):
+        """
+        Returns:
+          True             — Roblox is the foreground app
+          False            — ADB reachable but Roblox is not foreground
+          _DEVICE_NOT_FOUND — device serial not found by ADB
+        """
         try:
             from config.paths import adb_exe
             result = subprocess.run(
@@ -716,6 +731,12 @@ class DeviceWorker:
             return False
 
     def _check_roblox_running(self):
+        """
+        Returns:
+          True             — Roblox process exists (running or backgrounded)
+          False            — ADB reachable, Roblox process not found
+          _DEVICE_NOT_FOUND — device serial not found by ADB
+        """
         try:
             from config.paths import adb_exe
             result = subprocess.run(
