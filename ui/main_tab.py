@@ -50,7 +50,7 @@ _STATE_COLORS: dict[str, tuple[str, str]] = {
     "ROBLOX_HOME":             ("#374151", "#f3f4f6"),
     "FRIEND_CARD":             ("#374151", "#f3f4f6"),
     "HAMBURGER_MENU_OPEN":     ("#374151", "#f3f4f6"),
-    "CONTINUE_PLAYING_SCREEN": ("#374151", "#f3f4f6"),
+    "CONTINUE_PLAYING_BUTTON": ("#374151", "#f3f4f6"),
     "GAME_PAGE":               ("#374151", "#f3f4f6"),
     "GAME_PAGE_SCROLLED":      ("#374151", "#f3f4f6"),
     "SERVER_LIST":             ("#374151", "#f3f4f6"),

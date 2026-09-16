@@ -39,7 +39,7 @@ UNKNOWN                  = "UNKNOWN"
 # --- Rejoin navigation states ---
 JOIN_BUTTON              = "JOIN_BUTTON"
 HAMBURGER_MENU_OPEN      = "HAMBURGER_MENU"       # detector name: "hamburger_menu"
-CONTINUE_PLAYING_SCREEN  = "CONTINUE_PLAYING_SCREEN"
+CONTINUE_PLAYING_BUTTON  = "CONTINUE_PLAYING_BUTTON"
 GAME_PAGE                = "GAME_PAGE"
 GAME_PAGE_SCROLLED       = "GAME_PAGE_SCROLLED"
 SERVER_LIST              = "SERVER_LIST"

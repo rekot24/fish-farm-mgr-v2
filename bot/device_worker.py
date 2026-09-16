@@ -36,7 +36,7 @@ Fast-path rejoin (when 24rolla is visible on home screen):
 
 Fallback rejoin (hamburger menu route):
   ROBLOX_HOME → tap hamburger_menu (tap target) → HAMBURGER_MENU_OPEN detected
-  → tap continue_playing_button → CONTINUE_PLAYING_SCREEN
+  → tap continue_playing_button → CONTINUE_PLAYING_BUTTON
   → tap befish_game_icon → GAME_PAGE → swipe_down_full → GAME_PAGE_SCROLLED
   → tap servers_button → SERVER_LIST → tap private_server_entry → IN_TANK
 
@@ -81,7 +81,7 @@ _DETECTOR_PRIORITY = [
     states.JOIN_BUTTON,
     states.ROBLOX_HOME,
     states.HAMBURGER_MENU_OPEN,
-    states.CONTINUE_PLAYING_SCREEN,
+    states.CONTINUE_PLAYING_BUTTON,
     states.GAME_PAGE,
     states.GAME_PAGE_SCROLLED,
     states.SERVER_LIST,
@@ -380,8 +380,8 @@ class DeviceWorker:
             self._handle_roblox_home(cfg, settings)
         elif state == states.HAMBURGER_MENU_OPEN:
             self._handle_hamburger_menu_open(cfg, settings)
-        elif state == states.CONTINUE_PLAYING_SCREEN:
-            self._handle_continue_playing_screen(cfg, settings)
+        elif state == states.CONTINUE_PLAYING_BUTTON:
+            self._handle_continue_playing_button(cfg, settings)
         elif state == states.GAME_PAGE:
             self._handle_game_page(cfg, settings)
         elif state == states.GAME_PAGE_SCROLLED:
@@ -517,7 +517,7 @@ class DeviceWorker:
         else:
             self._log("continue_playing_button not found in hamburger menu", "WARNING")
 
-    def _handle_continue_playing_screen(self, cfg: DeviceConfig,
+    def _handle_continue_playing_button(self, cfg: DeviceConfig,
                                          settings: Settings) -> None:
         self._unknown_entered_at = None
         coords = self._resolve_tap_coords(cfg, ["befish_game_icon"])
