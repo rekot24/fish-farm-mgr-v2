@@ -32,7 +32,7 @@ Rejoin navigation is fully state-driven — no Chrome URL, no hardcoded sleeps.
 Each detected state triggers one action that advances to the next state.
 
 Fast-path rejoin (when 24rolla is visible on home screen):
-  ROBLOX_HOME → tap 24rolla_avatar → FRIEND_CARD → tap join_button → IN_TANK
+  ROBLOX_HOME → tap 24rolla_avatar → JOIN_BUTTON detected → tap Join → IN_TANK
 
 Fallback rejoin (hamburger menu route):
   ROBLOX_HOME → tap hamburger_menu → HAMBURGER_MENU_OPEN
@@ -61,7 +61,6 @@ from bot.actions import (
     tap,
 )
 from capture.base import CaptureBackend
-from config import settings
 from config.constants import DETECTION_THRESHOLD
 from config.devices import DeviceConfig, load_devices, save_devices
 from config.settings import Settings
@@ -74,7 +73,6 @@ _DETECTOR_PRIORITY = [
     states.DISCONNECTED,
     states.JOIN_BUTTON,
     states.ROBLOX_HOME,
-    states.FRIEND_CARD,
     states.HAMBURGER_MENU_OPEN,
     states.CONTINUE_PLAYING_SCREEN,
     states.GAME_PAGE,
@@ -381,8 +379,6 @@ class DeviceWorker:
             self._handle_join_button(cfg, settings)
         elif state == states.ROBLOX_HOME:
             self._handle_roblox_home(cfg, settings)
-        elif state == states.FRIEND_CARD:
-            self._handle_friend_card(cfg, settings)
         elif state == states.HAMBURGER_MENU_OPEN:
             self._handle_hamburger_menu_open(cfg, settings)
         elif state == states.CONTINUE_PLAYING_SCREEN:
@@ -500,16 +496,6 @@ class DeviceWorker:
             self._log("Neither 24rolla_avatar nor hamburger_menu found on home screen",
                       "WARNING")
 
-    def _handle_friend_card(self, cfg: DeviceConfig, settings: Settings) -> None:
-        self._unknown_entered_at = None
-        coords = self._resolve_tap_coords(cfg, ["join_button"])
-        if coords:
-            self._log("Friend card visible — tapping Join", "INFO")
-            tap(self._serial, coords[0], coords[1])
-            self._set_last_action("Tapped Join (friend card)")
-        else:
-            self._log("join_button not found on friend card", "WARNING")
-
     def _handle_join_button(self, cfg: DeviceConfig, settings: Settings) -> None:
         self._unknown_entered_at = None
         coords = self._resolve_tap_coords(cfg, ["join_button"])
@@ -625,8 +611,6 @@ class DeviceWorker:
           2. cached_tap_x/y — persisted screen coord. No detection needed.
           3. Neither set — run template match, persist to devices.json, use result.
         """
-        # Pass the full detector_assignments dict so the bank can look up
-        # which image file is assigned to each detector for this device.
         detector_assignments = cfg.detector_assignments
 
         for name in detector_names:
