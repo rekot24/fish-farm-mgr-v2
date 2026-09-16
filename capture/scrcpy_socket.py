@@ -3,7 +3,17 @@ capture/scrcpy_socket.py
 
 Scrcpy socket capture backend — primary capture backend.
 Uses the bundled adb.exe from tools/adb/ and scrcpy-server.jar from tools/scrcpy/.
-See original file for full protocol documentation.
+
+Reconnect behavior:
+  If the decode loop exits unexpectedly (e.g. ConnectionResetError from the
+  device dropping the TCP connection), the backend attempts to reconnect
+  automatically up to RECONNECT_ATTEMPTS times with RECONNECT_DELAY_S between
+  each attempt. If all attempts fail, _connected is set to False and the
+  worker's None-frame path takes over — incrementing the consecutive ADB
+  failure counter and eventually stopping the worker if the threshold is hit.
+
+  A clean stop via disconnect() sets _stop_event so the decode loop exits
+  without triggering reconnect.
 """
 
 from __future__ import annotations
@@ -33,7 +43,9 @@ from config.constants import (
 )
 from config.paths import adb_exe, scrcpy_jar_path
 
-_BASE_PORT = 27183
+_BASE_PORT        = 27183
+RECONNECT_ATTEMPTS = 2      # attempts after decode loop dies unexpectedly
+RECONNECT_DELAY_S  = 3.0   # seconds between reconnect attempts
 
 
 def _port_for_serial(serial: str) -> int:
@@ -47,8 +59,8 @@ class ScrcpySocketBackend(CaptureBackend):
     """
 
     _DEVICE_SERVER_PATH = "/data/local/tmp/scrcpy-server.jar"
-    _HEADER_SIZE = 64
-    _VIDEO_HEADER_SIZE = 12
+    _HEADER_SIZE        = 64
+    _VIDEO_HEADER_SIZE  = 12
 
     def __init__(
         self,
@@ -59,17 +71,17 @@ class ScrcpySocketBackend(CaptureBackend):
         development_mode: bool = False,
     ):
         super().__init__(serial)
-        self.max_size = max_size
-        self.bit_rate = bit_rate
+        self.max_size         = max_size
+        self.bit_rate         = bit_rate
         self.connect_timeout_s = connect_timeout_s
-        self.development_mode = development_mode
-        self.local_port = _port_for_serial(serial)
-        self._jar_path = scrcpy_jar_path()
+        self.development_mode  = development_mode
+        self.local_port        = _port_for_serial(serial)
+        self._jar_path         = scrcpy_jar_path()
 
-        self._sock: socket.socket | None = None
+        self._sock: socket.socket | None        = None
         self._server_proc: subprocess.Popen | None = None
-        self._decoder = None
-        self._latest_frame: np.ndarray | None = None
+        self._decoder                           = None
+        self._latest_frame: np.ndarray | None   = None
         self._decode_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
 
@@ -115,8 +127,8 @@ class ScrcpySocketBackend(CaptureBackend):
 
         except Exception as e:
             app_logger.log(
-                f"[scrcpy] connect() failed for {self.serial}: {type(e).__name__}: {e}",
-                "ERROR")
+                f"[scrcpy] connect() failed for {self.serial}: "
+                f"{type(e).__name__}: {e}", "ERROR")
             self.disconnect()
             return False
 
@@ -265,8 +277,10 @@ class ScrcpySocketBackend(CaptureBackend):
         return buf
 
     def _decode_loop(self) -> None:
-        buffer = b""
+        buffer     = b""
         chunk_size = 65536
+        unexpected_exit = False
+
         while not self._stop_event.is_set():
             try:
                 chunk = self._sock.recv(chunk_size)
@@ -275,7 +289,7 @@ class ScrcpySocketBackend(CaptureBackend):
                 buffer += chunk
                 try:
                     packets = self._decoder.parse(buffer)
-                    buffer = b""
+                    buffer  = b""
                     for packet in packets:
                         try:
                             frames = self._decoder.decode(packet)
@@ -291,7 +305,115 @@ class ScrcpySocketBackend(CaptureBackend):
                 if not self._stop_event.is_set():
                     app_logger.log(
                         f"[scrcpy] decode_loop error for {self.serial}: {e}", "ERROR")
+                    unexpected_exit = True
                 if self.development_mode and not self._stop_event.is_set():
                     raise
                 break
+
         app_logger.log(f"[scrcpy] Decode loop ended for {self.serial}", "INFO")
+
+        # Clean stop via disconnect() — do nothing, _connected already False
+        if self._stop_event.is_set():
+            return
+
+        # Unexpected exit (connection reset, etc.) — attempt reconnect
+        if unexpected_exit or not self._stop_event.is_set():
+            self._attempt_reconnect()
+
+    def _attempt_reconnect(self) -> None:
+        """
+        Called when the decode loop exits unexpectedly. Tears down the current
+        connection and attempts to reconnect up to RECONNECT_ATTEMPTS times.
+
+        On success: _connected remains True, new decode loop thread running.
+        On failure: _connected set to False — worker's None-frame path takes
+                    over and increments the consecutive ADB failure counter.
+        """
+        app_logger.log(
+            f"[scrcpy] Unexpected disconnect for {self.serial} — "
+            f"attempting reconnect (up to {RECONNECT_ATTEMPTS} attempts)", "WARNING")
+
+        # Tear down cleanly without triggering the stop event
+        # (stop_event would prevent the new decode loop from starting)
+        if self._sock:
+            try:
+                self._sock.close()
+            except Exception:
+                pass
+            self._sock = None
+
+        if self._server_proc:
+            try:
+                self._server_proc.terminate()
+            except Exception:
+                pass
+            self._server_proc = None
+
+        try:
+            subprocess.run(
+                [adb_exe(), "-s", self.serial, "shell", "pkill", "-f", "scrcpy-server"],
+                timeout=SCRCPY_TEARDOWN_TIMEOUT_S, capture_output=True,
+            )
+        except Exception:
+            pass
+
+        try:
+            subprocess.run(
+                [adb_exe(), "-s", self.serial, "forward",
+                 "--remove", f"tcp:{self.local_port}"],
+                timeout=SCRCPY_TEARDOWN_TIMEOUT_S, capture_output=True,
+            )
+        except Exception:
+            pass
+
+        for attempt in range(1, RECONNECT_ATTEMPTS + 1):
+            app_logger.log(
+                f"[scrcpy] Reconnect attempt {attempt}/{RECONNECT_ATTEMPTS} "
+                f"for {self.serial}", "INFO")
+            time.sleep(RECONNECT_DELAY_S)
+
+            try:
+                if not self._push_server():
+                    continue
+                if not self._setup_port_forward():
+                    continue
+                if not self._start_server():
+                    continue
+
+                time.sleep(SCRCPY_SERVER_BIND_SETTLE_S)
+
+                if not self._connect_socket():
+                    continue
+                if not self._read_headers():
+                    continue
+
+                # Reset decoder for fresh stream
+                self._decoder = _av_module.CodecContext.create("h264", "r")
+
+                # Start new decode thread
+                self._decode_thread = threading.Thread(
+                    target=self._decode_loop,
+                    daemon=True,
+                    name=f"scrcpy-decode-{self.serial[:8]}",
+                )
+                self._decode_thread.start()
+
+                self._connected = True
+                app_logger.log(
+                    f"[scrcpy] Reconnected to {self.serial} on port {self.local_port}",
+                    "INFO")
+                return
+
+            except Exception as e:
+                app_logger.log(
+                    f"[scrcpy] Reconnect attempt {attempt} failed for "
+                    f"{self.serial}: {e}", "WARNING")
+
+        # All attempts exhausted — mark as disconnected
+        # Worker's None-frame path will increment the ADB failure counter
+        self._connected = False
+        self._latest_frame = None
+        app_logger.log(
+            f"[scrcpy] All reconnect attempts failed for {self.serial} — "
+            f"backend disconnected. Worker will stop after failure threshold.",
+            "ERROR")

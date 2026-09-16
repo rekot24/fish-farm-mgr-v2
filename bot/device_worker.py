@@ -15,17 +15,18 @@ Consecutive ADB failure detection:
   operation will not accumulate toward the threshold across cycles that
   otherwise succeed.
 
+  Capture backend disconnect (scrcpy connection reset) is also funneled
+  through this counter. If the backend's auto-reconnect fails, _connected
+  becomes False and the worker treats each None-frame cycle as a failure.
+  At threshold the worker stops itself — same behavior as device-not-found.
+
 Tap coordinate resolution (_resolve_tap_coords):
   1. tap_offset_x/y set on the DetectorAssignment (manual override via
      crop tool amber dot) → use it always, runs detection for bbox origin.
   2. cached_tap_x/y set on the DetectorAssignment (persisted from a prior
      session's first successful match) → use it, no detection needed.
-  3. Neither set → run template match, store result as cached_tap_x/y in
-     devices.json via load_devices()/save_devices(), use it. Subsequent
-     calls skip detection entirely until a new image is assigned.
-
-  Cache is cleared automatically when a new image is assigned in the
-  capture tab (_assign_detector sets cached_tap_x/y to None).
+  3. Neither set → run template match, persist result to devices.json,
+     use it. Subsequent calls skip detection until a new image is assigned.
 
 Rejoin navigation is fully state-driven — no Chrome URL, no hardcoded sleeps.
 Each detected state triggers one action that advances to the next state.
@@ -36,16 +37,11 @@ Fast-path rejoin (when 24rolla is visible on home screen):
 Fallback rejoin (hamburger menu route):
   ROBLOX_HOME → tap hamburger_menu → HAMBURGER_MENU_OPEN
   → tap continue_playing_button → CONTINUE_PLAYING_SCREEN
-  → tap befish_game_icon → GAME_PAGE
-  → swipe_down_full → GAME_PAGE_SCROLLED
-  → tap servers_button → SERVER_LIST
-  → tap private_server_entry → IN_TANK
+  → tap befish_game_icon → GAME_PAGE → swipe_down_full → GAME_PAGE_SCROLLED
+  → tap servers_button → SERVER_LIST → tap private_server_entry → IN_TANK
 
-CRASHED state: launches Roblox if not running, then falls into ROBLOX_HOME
-detection naturally.
-
-DISCONNECTED state: fires immediately on detection — taps the Leave button
-via the disconnected detector's tap offset. No timer.
+CRASHED state: launches Roblox if not running, then falls into ROBLOX_HOME.
+DISCONNECTED state: fires immediately — taps Leave via tap offset. No timer.
 """
 
 from __future__ import annotations
@@ -71,8 +67,6 @@ from config.settings import Settings
 from detection.detector import run_detector_by_name
 from detection.template_bank import TemplateBank
 
-# Sentinel returned by ADB checks to distinguish "device not found" from
-# other failures (permission error, timeout, etc.)
 _DEVICE_NOT_FOUND = "device_not_found"
 
 _DETECTOR_PRIORITY = [
@@ -124,10 +118,6 @@ class DeviceWorker:
 
         self._lobby_entered_at: Optional[float] = None
         self._unknown_entered_at: Optional[float] = None
-
-        # Consecutive "device not found" counter.
-        # Reset to 0 on any successful ADB contact.
-        # Incremented only on "device not found" — not on other ADB errors.
         self._consecutive_adb_failures: int = 0
 
         self._last_frame = None
@@ -210,8 +200,23 @@ class DeviceWorker:
 
                 frame = self._capture.get_frame()
                 if frame is None:
-                    self._log("Frame capture returned None — checking if Roblox is running",
-                              "WARNING")
+                    # If the capture backend itself is disconnected (scrcpy
+                    # reconnect exhausted), treat as a failure directly —
+                    # no point running ADB foreground checks if the stream is dead.
+                    if not self._capture.is_connected:
+                        self._log(
+                            "Capture backend disconnected — "
+                            "scrcpy reconnect failed", "WARNING")
+                        if self._handle_adb_failure(settings):
+                            return
+                        time.sleep(settings.loop_interval_s)
+                        continue
+
+                    # Backend thinks it's connected but no frame yet —
+                    # check if Roblox is actually running.
+                    self._log(
+                        "Frame capture returned None — checking if Roblox is running",
+                        "WARNING")
                     foreground_result = self._check_roblox_foreground()
 
                     if foreground_result == _DEVICE_NOT_FOUND:
@@ -228,19 +233,22 @@ class DeviceWorker:
                                 self._consecutive_adb_failures = 0
                                 if not running_result:
                                     if self._current_state != states.CRASHED:
-                                        self._log("Roblox not running — marking as CRASHED",
-                                                  "WARNING")
+                                        self._log(
+                                            "Roblox not running — marking as CRASHED",
+                                            "WARNING")
                                         self._current_state = states.CRASHED
                                     self._act(states.CRASHED, cfg, settings)
                                 else:
-                                    self._log("Roblox is backgrounded — bringing to foreground",
-                                              "WARNING")
+                                    self._log(
+                                        "Roblox is backgrounded — bringing to foreground",
+                                        "WARNING")
                                     launch_roblox(self._serial)
                                     self._current_state = states.UNKNOWN
 
                     time.sleep(settings.loop_interval_s)
                     continue
 
+                # Frame received — backend is alive, reset failure counter
                 self._consecutive_adb_failures = 0
                 self._last_frame = frame
                 detected_state = self._resolve_state(frame, cfg, settings)
@@ -598,13 +606,9 @@ class DeviceWorker:
         Resolve tap coordinates for the first matching detector in detector_names.
 
         Priority:
-          1. tap_offset_x/y set — manual override via crop tool amber dot.
-             Runs detection to get bbox origin, applies offset from there.
-          2. cached_tap_x/y set — persisted screen coord from a prior match.
-             No detection needed; use directly.
-          3. Neither set — run template match, persist result to devices.json,
-             update in-memory assignment, return coordinate.
-             All future calls skip detection until a new image is assigned.
+          1. tap_offset_x/y — manual override, always wins. Needs detection for bbox.
+          2. cached_tap_x/y — persisted screen coord. No detection needed.
+          3. Neither set — run template match, persist to devices.json, use result.
         """
         device_overrides = list(cfg.detector_assignments.keys())
 
@@ -617,7 +621,7 @@ class DeviceWorker:
             if assignment is None:
                 continue
 
-            # Priority 1: manual tap override — needs bbox, run detection
+            # Priority 1: manual tap override
             if assignment.tap_offset_x is not None:
                 if self._last_frame is None:
                     continue
@@ -634,7 +638,7 @@ class DeviceWorker:
                             result.bbox[1] + assignment.tap_offset_y)
                 continue
 
-            # Priority 2: persistent cache — skip detection entirely
+            # Priority 2: persistent cache
             if assignment.cached_tap_x is not None:
                 self._log(
                     f"[tap_cache] HIT {detector_key} → "
@@ -655,13 +659,8 @@ class DeviceWorker:
             )
             if result.found and result.center:
                 x, y = result.center
-
-                # Update in-memory assignment for this session
                 assignment.cached_tap_x = x
                 assignment.cached_tap_y = y
-
-                # Persist to devices.json — load fresh to avoid overwriting
-                # changes made by other parts of the app since last save
                 try:
                     all_devices = load_devices()
                     persisted = all_devices.get(self._serial)
@@ -674,7 +673,6 @@ class DeviceWorker:
                 except Exception as e:
                     self._log(
                         f"[tap_cache] Failed to persist {detector_key}: {e}", "WARNING")
-
                 return (x, y)
 
         return None
@@ -694,16 +692,10 @@ class DeviceWorker:
         self._last_end_run_tap = time.monotonic()
 
     # ------------------------------------------------------------------
-    # ADB checks — return True/False or _DEVICE_NOT_FOUND sentinel
+    # ADB checks
     # ------------------------------------------------------------------
 
     def _check_roblox_foreground(self):
-        """
-        Returns:
-          True             — Roblox is the foreground app
-          False            — ADB reachable but Roblox is not foreground
-          _DEVICE_NOT_FOUND — device serial not found by ADB
-        """
         try:
             from config.paths import adb_exe
             result = subprocess.run(
@@ -731,12 +723,6 @@ class DeviceWorker:
             return False
 
     def _check_roblox_running(self):
-        """
-        Returns:
-          True             — Roblox process exists (running or backgrounded)
-          False            — ADB reachable, Roblox process not found
-          _DEVICE_NOT_FOUND — device serial not found by ADB
-        """
         try:
             from config.paths import adb_exe
             result = subprocess.run(
