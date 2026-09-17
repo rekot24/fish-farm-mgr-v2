@@ -238,7 +238,7 @@ class DeviceWorker:
                                             "Roblox not running — marking as CRASHED",
                                             "WARNING")
                                         self._current_state = states.CRASHED
-                                    self._act(states.CRASHED, cfg, settings)
+                                    self._act(states.CRASHED, None, cfg, settings)
                                 else:
                                     self._log(
                                         "Roblox is backgrounded — bringing to foreground",
@@ -251,8 +251,8 @@ class DeviceWorker:
 
                 self._consecutive_adb_failures = 0
                 self._last_frame = frame
-                detected_state = self._resolve_state(frame, cfg, settings)
-                self._act(detected_state, cfg, settings)
+                detected_state, detect_result = self._resolve_state(frame, cfg, settings)
+                self._act(detected_state, detect_result, cfg, settings)
                 time.sleep(settings.loop_interval_s)
 
             except Exception as e:
@@ -289,7 +289,11 @@ class DeviceWorker:
     # State resolution
     # ------------------------------------------------------------------
 
-    def _resolve_state(self, frame, cfg: DeviceConfig, settings: Settings) -> str:
+    def _resolve_state(self, frame, cfg: DeviceConfig, settings: Settings):
+        """
+        Returns (state_str, detect_result) where detect_result is the
+        DetectResult that matched, or None for CRASHED/UNKNOWN.
+        """
         detector_assignments = cfg.detector_assignments
 
         for detector_name in _DETECTOR_PRIORITY:
@@ -313,7 +317,7 @@ class DeviceWorker:
                         f"State: {self._current_state} → {detector_name} "
                         f"(score={result.score:.3f})", "INFO")
                     self._current_state = detector_name
-                return detector_name
+                return detector_name, result
 
         foreground_result = self._check_roblox_foreground()
         if foreground_result == _DEVICE_NOT_FOUND:
@@ -324,16 +328,16 @@ class DeviceWorker:
                 if self._current_state != states.CRASHED:
                     self._log("Roblox not running — marking as CRASHED", "WARNING")
                     self._current_state = states.CRASHED
-                return states.CRASHED
+                return states.CRASHED, None
             elif running_result != _DEVICE_NOT_FOUND:
                 self._log("Roblox is backgrounded — bringing to foreground", "WARNING")
                 launch_roblox(self._serial)
-                return states.UNKNOWN
+                return states.UNKNOWN, None
 
         if self._current_state != states.UNKNOWN:
             self._log(f"State: {self._current_state} → {states.UNKNOWN}", "INFO")
             self._current_state = states.UNKNOWN
-        return states.UNKNOWN
+        return states.UNKNOWN, None
 
     def _check_secondary(self, detector_name: str, cfg: DeviceConfig,
                           settings: Settings) -> bool:
@@ -361,7 +365,7 @@ class DeviceWorker:
     # Action dispatch
     # ------------------------------------------------------------------
 
-    def _act(self, state: str, cfg: DeviceConfig, settings: Settings) -> None:
+    def _act(self, state: str, detect_result, cfg: DeviceConfig, settings: Settings) -> None:
         if cfg.stay_awake_enabled:
             now = time.monotonic()
             if now - self._last_stay_awake_tap >= cfg.stay_awake_interval_s:
@@ -382,7 +386,7 @@ class DeviceWorker:
         elif state == states.BEFISH_GAME_ICON:
             self._handle_befish_game_icon(cfg, settings)
         elif state == states.GAME_PAGE:
-            self._handle_game_page(cfg, settings)
+            self._handle_game_page(detect_result, cfg, settings)
         elif state == states.SERVERS_BUTTON:
             self._handle_servers_button(cfg, settings)
         elif state == states.SERVER_LIST:
@@ -529,10 +533,26 @@ class DeviceWorker:
         else:
             self._log("befish_game_icon coords not resolved", "WARNING")
 
-    def _handle_game_page(self, cfg: DeviceConfig, settings: Settings) -> None:
+    def _handle_game_page(self, detect_result, cfg: DeviceConfig, settings: Settings) -> None:
         self._unknown_entered_at = None
-        self._log("Game page detected — swiping up within card to reveal Servers button", "INFO")
-        swipe_card_up(self._serial)
+        # Use the detected bbox to calculate swipe coordinates relative to
+        # where the card actually is on screen — works across all device sizes.
+        if detect_result and detect_result.bbox:
+            bx, by, bw, bh = detect_result.bbox
+            card_center_x = bx + bw // 2
+            # Start well below the detected image (inside the card content area)
+            # End well above it (scroll content upward)
+            swipe_start_y = by + bh + 300
+            swipe_end_y   = by - 200
+            self._log(
+                f"Game page detected at bbox ({bx},{by},{bw},{bh}) — "
+                f"swiping from y={swipe_start_y} to y={swipe_end_y}", "INFO")
+            swipe_card_up(self._serial, swipe_start_y, swipe_end_y, card_center_x)
+        else:
+            # Fallback: no bbox available, log a warning and do nothing.
+            # Next cycle will re-detect and try again.
+            self._log("Game page: no bbox from detection — skipping swipe", "WARNING")
+            return
         self._set_last_action("Swiped up within game page card")
 
     def _handle_servers_button(self, cfg: DeviceConfig, settings: Settings) -> None:

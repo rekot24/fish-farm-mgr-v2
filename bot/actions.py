@@ -75,22 +75,32 @@ def launch_roblox(serial: str) -> bool:
     )
 
 
-def swipe_card_up(serial: str) -> bool:
+def swipe_card_up(
+    serial: str,
+    start_y: int,
+    end_y: int,
+    x: int = 540,
+) -> bool:
     """
-    Swipe upward within the game page bottom-sheet card.
+    Fast upward flick within the game page bottom-sheet card.
 
-    After tapping the Be Fish game icon, Roblox shows a half-screen card
-    from the bottom. Swiping from the middle of that card upward scrolls
-    its content to reveal the Servers button — without starting so low
-    that the gesture lands below the card and dismisses it instead.
+    Coordinates are calculated from the detected game_page image bbox so
+    the swipe is always relative to where the card actually is on screen —
+    works correctly across all device screen sizes without hardcoding.
 
-    Start y=1400 (mid-card), end y=400 (near top), duration 500ms.
-    x=540 targets center of a 1080-wide screen.
+    Args:
+        serial  : ADB device serial
+        start_y : Y coordinate to start the swipe (bottom of detected bbox + offset)
+        end_y   : Y coordinate to end the swipe (above the detected bbox)
+        x       : horizontal center of the swipe (defaults to 540 for 1080-wide screens)
+
+    Duration 150ms makes it a flick rather than a drag — critical for bottom
+    sheets which dismiss on slow drags but scroll on fast flicks.
     """
     return _adb(
         serial,
         "shell", "input", "swipe",
-        "540", "1400", "540", "400", "500",
+        str(x), str(start_y), str(x), str(end_y), "150",
     )
 
 
