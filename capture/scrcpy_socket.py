@@ -4,29 +4,10 @@ capture/scrcpy_socket.py
 Scrcpy socket capture backend — primary capture backend.
 Uses the bundled adb.exe from tools/adb/ and scrcpy-server.jar from tools/scrcpy/.
 
-Reconnect behavior:
-  If the decode loop exits unexpectedly (e.g. ConnectionResetError from the
-  device dropping the TCP connection), the backend attempts to reconnect
-  automatically up to RECONNECT_ATTEMPTS times with RECONNECT_DELAY_S between
-  each attempt. If all attempts fail, _connected is set to False and the
-  worker's None-frame path takes over — incrementing the consecutive ADB
-  failure counter and eventually stopping the worker if the threshold is hit.
-
-Lifecycle behavior:
-  A clean disconnect sets _stop_event before closing the socket, so the decode
-  thread cannot interpret an intentional stop as an unexpected disconnect and
-  respawn the server. Remote scrcpy Server/Cleanup app_process instances are
-  found by /proc/<pid>/cmdline and killed by PID; this is more reliable across
-  Android builds than pkill pattern matching.
-
-Protocol compatibility:
-  scrcpy forward-tunnel sessions include a leading dummy byte before device
-  metadata. Stream metadata is parsed using the scrcpy 4.x layout: codec id
-  followed by a 12-byte video session packet. Media frame metadata is retained
-  so packet boundaries from MediaCodec are preserved across hardware encoders.
-  H264 codec-config packets are handled according to format: AVCC is installed
-  as decoder extradata, while Annex-B SPS/PPS remains in-band and is prepended
-  to keyframes so FFmpeg sees a normal Annex-B elementary stream.
+The backend speaks the scrcpy 4.1 socket protocol directly. It keeps scrcpy
+frame metadata enabled so MediaCodec packet boundaries are preserved, handles
+the forward-tunnel dummy byte and video session metadata, and supports both
+Annex-B and AVCC H.264 encoder output.
 """
 
 from __future__ import annotations
@@ -43,26 +24,32 @@ try:
 except ImportError:
     _av_module = None
     _AV_AVAILABLE = False
+
 import numpy as np
 
 from capture.base import CaptureBackend
 from bot import app_logger
 from config.constants import (
-    ADB_DEFAULT_TIMEOUT_S, SCRCPY_PORT_RANGE_SIZE, SCRCPY_SERVER_BIND_SETTLE_S,
-    SCRCPY_DECODE_THREAD_JOIN_TIMEOUT_S, SCRCPY_TEARDOWN_TIMEOUT_S,
-    SCRCPY_SOCKET_CONNECT_ATTEMPT_TIMEOUT_S, SCRCPY_SOCKET_RETRY_SLEEP_S,
+    ADB_DEFAULT_TIMEOUT_S,
+    SCRCPY_PORT_RANGE_SIZE,
+    SCRCPY_SERVER_BIND_SETTLE_S,
+    SCRCPY_DECODE_THREAD_JOIN_TIMEOUT_S,
+    SCRCPY_TEARDOWN_TIMEOUT_S,
+    SCRCPY_SOCKET_CONNECT_ATTEMPT_TIMEOUT_S,
+    SCRCPY_SOCKET_RETRY_SLEEP_S,
 )
 from config.paths import adb_exe, scrcpy_jar_path
 
-_BASE_PORT           = 27183
-RECONNECT_ATTEMPTS   = 2
-RECONNECT_DELAY_S    = 3.0
-_H264_CODEC_ID       = 0x68323634
+_BASE_PORT = 27183
+RECONNECT_ATTEMPTS = 2
+RECONNECT_DELAY_S = 3.0
+
+_H264_CODEC_ID = 0x68323634
 _PACKET_FLAG_SESSION = 1 << 63
-_PACKET_FLAG_CONFIG  = 1 << 62
-_PACKET_FLAG_KEY     = 1 << 61
-_PTS_MASK            = (1 << 61) - 1
-_MAX_PACKET_SIZE     = 32 * 1024 * 1024
+_PACKET_FLAG_CONFIG = 1 << 62
+_PACKET_FLAG_KEY = 1 << 61
+_PTS_MASK = (1 << 61) - 1
+_MAX_PACKET_SIZE = 32 * 1024 * 1024
 
 
 def _port_for_serial(serial: str) -> int:
@@ -73,9 +60,9 @@ class ScrcpySocketBackend(CaptureBackend):
     """Primary capture backend using scrcpy's server socket mode."""
 
     _DEVICE_SERVER_PATH = "/data/local/tmp/scrcpy-server.jar"
-    _HEADER_SIZE         = 64
-    _CODEC_HEADER_SIZE   = 4
-    _PACKET_HEADER_SIZE  = 12
+    _HEADER_SIZE = 64
+    _CODEC_HEADER_SIZE = 4
+    _PACKET_HEADER_SIZE = 12
 
     def __init__(
         self,
@@ -99,6 +86,7 @@ class ScrcpySocketBackend(CaptureBackend):
         self._latest_frame: np.ndarray | None = None
         self._decode_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+
         self._decode_error_count = 0
         self._packet_count = 0
         self._h264_packet_format: str | None = None
@@ -108,16 +96,13 @@ class ScrcpySocketBackend(CaptureBackend):
         try:
             if not self._jar_path.exists():
                 app_logger.log(
-                    f"[scrcpy] Server jar not found: {self._jar_path}", "ERROR")
+                    f"[scrcpy] Server jar not found: {self._jar_path}", "ERROR"
+                )
                 self.disconnect()
                 return False
 
             self._stop_event.clear()
-            self._latest_frame = None
-            self._decode_error_count = 0
-            self._packet_count = 0
-            self._h264_packet_format = None
-            self._h264_annexb_config = None
+            self._reset_decoder_state()
 
             if not self._push_server():
                 self.disconnect()
@@ -139,11 +124,13 @@ class ScrcpySocketBackend(CaptureBackend):
                 return False
 
             if not _AV_AVAILABLE:
-                app_logger.log("[scrcpy] PyAV not installed. Run: pip install av", "ERROR")
+                app_logger.log(
+                    "[scrcpy] PyAV not installed. Run: pip install av", "ERROR"
+                )
                 self.disconnect()
                 return False
-            self._decoder = _av_module.CodecContext.create("h264", "r")
 
+            self._decoder = _av_module.CodecContext.create("h264", "r")
             self._decode_thread = threading.Thread(
                 target=self._decode_loop,
                 daemon=True,
@@ -153,13 +140,17 @@ class ScrcpySocketBackend(CaptureBackend):
 
             self._connected = True
             app_logger.log(
-                f"[scrcpy] Connected to {self.serial} on port {self.local_port}", "INFO")
+                f"[scrcpy] Connected to {self.serial} on port {self.local_port}",
+                "INFO",
+            )
             return True
 
         except Exception as e:
             app_logger.log(
                 f"[scrcpy] connect() failed for {self.serial}: "
-                f"{type(e).__name__}: {e}", "ERROR")
+                f"{type(e).__name__}: {e}",
+                "ERROR",
+            )
             self.disconnect()
             return False
 
@@ -199,14 +190,22 @@ class ScrcpySocketBackend(CaptureBackend):
 
         self._kill_remote_scrcpy_processes()
         self._remove_port_forward()
+        self._reset_decoder_state()
 
+    def _reset_decoder_state(self) -> None:
         self._decoder = None
         self._latest_frame = None
+        self._decode_error_count = 0
+        self._packet_count = 0
         self._h264_packet_format = None
         self._h264_annexb_config = None
 
-    def _adb(self, *args, timeout: float = ADB_DEFAULT_TIMEOUT_S,
-             capture: bool = True) -> subprocess.CompletedProcess:
+    def _adb(
+        self,
+        *args,
+        timeout: float = ADB_DEFAULT_TIMEOUT_S,
+        capture: bool = True,
+    ) -> subprocess.CompletedProcess:
         cmd = [adb_exe(), "-s", self.serial] + list(args)
         return subprocess.run(cmd, capture_output=capture, timeout=timeout)
 
@@ -232,8 +231,14 @@ class ScrcpySocketBackend(CaptureBackend):
     def _remove_port_forward(self) -> None:
         try:
             subprocess.run(
-                [adb_exe(), "-s", self.serial, "forward",
-                 "--remove", f"tcp:{self.local_port}"],
+                [
+                    adb_exe(),
+                    "-s",
+                    self.serial,
+                    "forward",
+                    "--remove",
+                    f"tcp:{self.local_port}",
+                ],
                 timeout=SCRCPY_TEARDOWN_TIMEOUT_S,
                 capture_output=True,
             )
@@ -257,10 +262,7 @@ class ScrcpySocketBackend(CaptureBackend):
 
         self._kill_remote_scrcpy_processes()
         self._remove_port_forward()
-        self._decoder = None
-        self._latest_frame = None
-        self._h264_packet_format = None
-        self._h264_annexb_config = None
+        self._reset_decoder_state()
 
     def _push_server(self) -> bool:
         try:
@@ -282,10 +284,12 @@ class ScrcpySocketBackend(CaptureBackend):
     def _setup_port_forward(self) -> bool:
         try:
             result = self._adb(
-                "forward", f"tcp:{self.local_port}", "localabstract:scrcpy")
+                "forward", f"tcp:{self.local_port}", "localabstract:scrcpy"
+            )
             if result.returncode != 0:
                 app_logger.log(
-                    f"[scrcpy] Port forward failed for {self.serial}", "ERROR")
+                    f"[scrcpy] Port forward failed for {self.serial}", "ERROR"
+                )
                 return False
             return True
         except Exception as e:
@@ -295,9 +299,13 @@ class ScrcpySocketBackend(CaptureBackend):
     def _start_server(self) -> bool:
         try:
             cmd = [
-                adb_exe(), "-s", self.serial, "shell",
+                adb_exe(),
+                "-s",
+                self.serial,
+                "shell",
                 f"CLASSPATH={self._DEVICE_SERVER_PATH}",
-                "app_process", "/",
+                "app_process",
+                "/",
                 "com.genymobile.scrcpy.Server",
                 "4.1",
                 "tunnel_forward=true",
@@ -308,7 +316,8 @@ class ScrcpySocketBackend(CaptureBackend):
                 "send_frame_meta=true",
             ]
             self._server_proc = subprocess.Popen(
-                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
             return True
         except Exception as e:
             app_logger.log(f"[scrcpy] start_server error: {e}", "ERROR")
@@ -320,14 +329,17 @@ class ScrcpySocketBackend(CaptureBackend):
             try:
                 sock = socket.create_connection(
                     ("127.0.0.1", self.local_port),
-                    timeout=SCRCPY_SOCKET_CONNECT_ATTEMPT_TIMEOUT_S)
+                    timeout=SCRCPY_SOCKET_CONNECT_ATTEMPT_TIMEOUT_S,
+                )
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 self._sock = sock
                 return True
             except (ConnectionRefusedError, OSError):
                 time.sleep(SCRCPY_SOCKET_RETRY_SLEEP_S)
+
         app_logger.log(
-            f"[scrcpy] Socket connection timed out for {self.serial}", "ERROR")
+            f"[scrcpy] Socket connection timed out for {self.serial}", "ERROR"
+        )
         return False
 
     def _read_headers(self) -> bool:
@@ -335,7 +347,9 @@ class ScrcpySocketBackend(CaptureBackend):
             first_byte = self._recv_exact(1)
             if not first_byte:
                 app_logger.log(
-                    f"[scrcpy] Failed to read stream prefix from {self.serial}", "ERROR")
+                    f"[scrcpy] Failed to read stream prefix from {self.serial}",
+                    "ERROR",
+                )
                 return False
 
             if first_byte == b"\x00":
@@ -350,17 +364,23 @@ class ScrcpySocketBackend(CaptureBackend):
 
             if not device_header:
                 app_logger.log(
-                    f"[scrcpy] Failed to read device header from {self.serial}", "ERROR")
+                    f"[scrcpy] Failed to read device header from {self.serial}",
+                    "ERROR",
+                )
                 return False
 
-            device_name = device_header.rstrip(b"\x00").decode("utf-8", errors="replace")
+            device_name = device_header.rstrip(b"\x00").decode(
+                "utf-8", errors="replace"
+            )
             app_logger.log(f"[scrcpy] Device: {device_name}", "INFO")
 
             codec_header = self._recv_exact(self._CODEC_HEADER_SIZE)
             if not codec_header:
                 app_logger.log(
-                    f"[scrcpy] Failed to read codec id from {self.serial}", "ERROR")
+                    f"[scrcpy] Failed to read codec id from {self.serial}", "ERROR"
+                )
                 return False
+
             codec_id = struct.unpack(">I", codec_header)[0]
             if codec_id != _H264_CODEC_ID:
                 app_logger.log(
@@ -388,7 +408,9 @@ class ScrcpySocketBackend(CaptureBackend):
                 return False
 
             app_logger.log(
-                f"[scrcpy] Stream: codec={codec_id:#010x} size={width}x{height}", "INFO")
+                f"[scrcpy] Stream: codec={codec_id:#010x} size={width}x{height}",
+                "INFO",
+            )
             return True
         except Exception as e:
             app_logger.log(f"[scrcpy] read_headers error: {e}", "ERROR")
@@ -409,7 +431,9 @@ class ScrcpySocketBackend(CaptureBackend):
     @staticmethod
     def _normalize_h264_payload(payload: bytes) -> bytes:
         """Preserve Annex-B H264; convert 4-byte length-prefixed NALs to Annex-B."""
-        if payload.startswith(b"\x00\x00\x00\x01") or payload.startswith(b"\x00\x00\x01"):
+        if payload.startswith(b"\x00\x00\x00\x01") or payload.startswith(
+            b"\x00\x00\x01"
+        ):
             return payload
 
         offset = 0
@@ -417,11 +441,11 @@ class ScrcpySocketBackend(CaptureBackend):
         nal_count = 0
         size = len(payload)
         while offset + 4 <= size:
-            nal_size = int.from_bytes(payload[offset:offset + 4], "big")
+            nal_size = int.from_bytes(payload[offset : offset + 4], "big")
             if nal_size <= 0 or offset + 4 + nal_size > size:
                 return payload
             out += b"\x00\x00\x00\x01"
-            out += payload[offset + 4:offset + 4 + nal_size]
+            out += payload[offset + 4 : offset + 4 + nal_size]
             offset += 4 + nal_size
             nal_count += 1
 
@@ -432,17 +456,12 @@ class ScrcpySocketBackend(CaptureBackend):
     def _apply_h264_config(self, payload: bytes) -> None:
         """Configure a fresh decoder for this encoder's H264 packet format."""
         if payload and payload[0] == 1:
-            # AVCDecoderConfigurationRecord (avcC). FFmpeg uses this extradata
-            # to interpret following length-prefixed access units.
             self._h264_packet_format = "avcc"
             self._h264_annexb_config = None
             decoder = _av_module.CodecContext.create("h264", "r")
             decoder.extradata = payload
             self._decoder = decoder
         else:
-            # Annex-B config is already an elementary stream (typically SPS +
-            # PPS). Keep it in-band instead of forcing it into extradata; some
-            # FFmpeg/PyAV builds reject hardware-encoder Annex-B config there.
             self._h264_packet_format = "annexb"
             self._h264_annexb_config = self._normalize_h264_payload(payload)
             self._decoder = _av_module.CodecContext.create("h264", "r")
@@ -455,9 +474,31 @@ class ScrcpySocketBackend(CaptureBackend):
             "INFO",
         )
 
+    def _store_frames(self, frames) -> None:
+        for frame in frames:
+            self._latest_frame = frame.to_ndarray(format="bgr24")
+
+    def _decode_annexb(self, packet_data: bytes, pts: int) -> None:
+        """
+        Feed validated Annex-B bytes through FFmpeg's H.264 parser first.
+
+        MediaCodec packet boundaries are not necessarily FFmpeg access-unit
+        boundaries. The parser assembles SPS/PPS/slices into decoder-ready
+        packets while keeping scrcpy protocol metadata completely out of the
+        elementary stream.
+        """
+        parsed_packets = self._decoder.parse(packet_data)
+        for parsed in parsed_packets:
+            if parsed.pts is None:
+                parsed.pts = pts
+            if parsed.dts is None:
+                parsed.dts = pts
+            self._store_frames(self._decoder.decode(parsed))
+
     def _decode_loop(self) -> None:
         unexpected_exit = False
         first_payload_logged = False
+        first_media_logged = False
 
         while not self._stop_event.is_set():
             try:
@@ -523,13 +564,24 @@ class ScrcpySocketBackend(CaptureBackend):
                     if is_key and self._h264_annexb_config:
                         packet_data = self._h264_annexb_config + packet_data
 
+                if not first_media_logged:
+                    first_media_logged = True
+                    app_logger.log(
+                        f"[scrcpy] First media packet {self.serial}: "
+                        f"bytes={len(payload)} key={is_key} "
+                        f"format={self._h264_packet_format} "
+                        f"head={payload[:24].hex()}",
+                        "INFO",
+                    )
+
                 try:
-                    packet = _av_module.Packet(packet_data)
-                    packet.pts = pts
-                    packet.dts = pts
-                    frames = self._decoder.decode(packet)
-                    for frame in frames:
-                        self._latest_frame = frame.to_ndarray(format="bgr24")
+                    if self._h264_packet_format == "avcc":
+                        packet = _av_module.Packet(packet_data)
+                        packet.pts = pts
+                        packet.dts = pts
+                        self._store_frames(self._decoder.decode(packet))
+                    else:
+                        self._decode_annexb(packet_data, pts)
                 except Exception as e:
                     self._decode_error_count += 1
                     if self._decode_error_count <= 5:
@@ -547,7 +599,8 @@ class ScrcpySocketBackend(CaptureBackend):
             except Exception as e:
                 if not self._stop_event.is_set():
                     app_logger.log(
-                        f"[scrcpy] decode_loop error for {self.serial}: {e}", "ERROR")
+                        f"[scrcpy] decode_loop error for {self.serial}: {e}", "ERROR"
+                    )
                     unexpected_exit = True
                 if self.development_mode and not self._stop_event.is_set():
                     raise
@@ -567,7 +620,9 @@ class ScrcpySocketBackend(CaptureBackend):
 
         app_logger.log(
             f"[scrcpy] Unexpected disconnect for {self.serial} — "
-            f"attempting reconnect (up to {RECONNECT_ATTEMPTS} attempts)", "WARNING")
+            f"attempting reconnect (up to {RECONNECT_ATTEMPTS} attempts)",
+            "WARNING",
+        )
 
         self._reset_transport_for_retry()
 
@@ -577,7 +632,9 @@ class ScrcpySocketBackend(CaptureBackend):
 
             app_logger.log(
                 f"[scrcpy] Reconnect attempt {attempt}/{RECONNECT_ATTEMPTS} "
-                f"for {self.serial}", "INFO")
+                f"for {self.serial}",
+                "INFO",
+            )
             time.sleep(RECONNECT_DELAY_S)
 
             if self._stop_event.is_set():
@@ -622,13 +679,16 @@ class ScrcpySocketBackend(CaptureBackend):
                 self._connected = True
                 app_logger.log(
                     f"[scrcpy] Reconnected to {self.serial} on port {self.local_port}",
-                    "INFO")
+                    "INFO",
+                )
                 return
 
             except Exception as e:
                 app_logger.log(
                     f"[scrcpy] Reconnect attempt {attempt} failed for "
-                    f"{self.serial}: {e}", "WARNING")
+                    f"{self.serial}: {e}",
+                    "WARNING",
+                )
                 self._reset_transport_for_retry()
 
         self._connected = False
@@ -636,4 +696,5 @@ class ScrcpySocketBackend(CaptureBackend):
         app_logger.log(
             f"[scrcpy] All reconnect attempts failed for {self.serial} — "
             f"backend disconnected. Worker will stop after failure threshold.",
-            "ERROR")
+            "ERROR",
+        )
