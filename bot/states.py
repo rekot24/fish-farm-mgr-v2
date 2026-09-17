@@ -16,8 +16,7 @@ and the asset folder name). to_detector_name() lowercases the value —
 so "SERVERS_BUTTON" → "servers_button", which must match the capture tab.
 
 Tap-target-only detectors (24rolla_avatar, hamburger_menu,
-continue_playing_button, befish_game_icon, private_server_entry,
-end_run_button, auto_farm_on) are referenced as plain strings in
+continue_playing_button, befish_game_icon, end_run_button, auto_farm_on) are referenced as plain strings in
 handler code only — no state constant needed.
 
 CRASHED is determined by ADB process check, not image detection —
@@ -29,7 +28,7 @@ Rejoin fallback chain (hamburger route):
   → BEFISH_GAME_ICON detected → tap befish_game_icon (tap target)
   → GAME_PAGE detected → swipe up (no tap)
   → SERVERS_BUTTON detected → tap servers_button (tap target)
-  → SERVER_LIST detected → tap private_server_entry (tap target)
+  → PRIVATE_SERVER_ENTRY detected → tap private_server_entry (its own element)
   → IN_TANK
 """
 
@@ -51,7 +50,7 @@ CONTINUE_PLAYING_BUTTON  = "CONTINUE_PLAYING_BUTTON"
 BEFISH_GAME_ICON         = "BEFISH_GAME_ICON"
 GAME_PAGE                = "GAME_PAGE"
 SERVERS_BUTTON           = "SERVERS_BUTTON"
-SERVER_LIST              = "SERVER_LIST"
+PRIVATE_SERVER_ENTRY     = "PRIVATE_SERVER_ENTRY"
 
 
 def to_detector_name(state: str) -> str:
@@ -61,7 +60,7 @@ def to_detector_name(state: str) -> str:
 
     e.g. "AUTO_FARM_OFF"     → "auto_farm_off"
          "BEFISH_GAME_ICON"  → "befish_game_icon"
-         "SERVERS_BUTTON"    → "servers_button"
+         "PRIVATE_SERVER_ENTRY" → "private_server_entry"
     """
     return state.lower()
 

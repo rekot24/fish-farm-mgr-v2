@@ -41,7 +41,7 @@ Fallback rejoin (hamburger menu route):
   → BEFISH_GAME_ICON → tap befish_game_icon (tap target)
   → GAME_PAGE → swipe up (no tap)
   → SERVERS_BUTTON → tap servers_button (tap target)
-  → SERVER_LIST → tap private_server_entry (tap target)
+  → PRIVATE_SERVER_ENTRY → tap private_server_entry (its own element)
   → IN_TANK
 
 CRASHED state: determined by ADB process check, not image detection.
@@ -82,7 +82,7 @@ _DETECTOR_PRIORITY = [
     states.BEFISH_GAME_ICON,
     states.GAME_PAGE,
     states.SERVERS_BUTTON,
-    states.SERVER_LIST,
+    states.PRIVATE_SERVER_ENTRY,
     states.LOBBY,
     states.AUTO_FARM_OFF,
     states.DEATH_SCREEN,
@@ -388,8 +388,8 @@ class DeviceWorker:
             self._handle_game_page(detect_result, cfg, settings)
         elif state == states.SERVERS_BUTTON:
             self._handle_servers_button(cfg, settings)
-        elif state == states.SERVER_LIST:
-            self._handle_server_list(cfg, settings)
+        elif state == states.PRIVATE_SERVER_ENTRY:
+            self._handle_private_server_entry(cfg, settings)
         elif state == states.LOBBY:
             self._handle_lobby(cfg, settings)
         elif state == states.AUTO_FARM_OFF:
@@ -559,11 +559,11 @@ class DeviceWorker:
         else:
             self._log("servers_button coords not resolved", "WARNING")
 
-    def _handle_server_list(self, cfg: DeviceConfig, settings: Settings) -> None:
+    def _handle_private_server_entry(self, cfg: DeviceConfig, settings: Settings) -> None:
         self._unknown_entered_at = None
         coords = self._resolve_tap_coords(cfg, ["private_server_entry"])
         if coords:
-            self._log("Server list open — tapping private server", "INFO")
+            self._log("Private server entry visible — tapping it", "INFO")
             tap(self._serial, coords[0], coords[1])
             self._set_last_action("Tapped private server entry")
         else:

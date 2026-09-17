@@ -118,7 +118,7 @@ def expand_and_scroll_game_page(
             "shell", "input", "swipe",
             str(focus_x), "1600", str(focus_x), "400", "300",
         )
-        time.sleep(0.2)
+        time.sleep(0.4)
 
     return success
 
