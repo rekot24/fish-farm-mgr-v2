@@ -21,9 +21,12 @@ Lifecycle behavior:
 
 Protocol compatibility:
   scrcpy forward-tunnel sessions may include a single leading dummy byte before
-  the 64-byte device metadata header. Some devices/builds expose it while
-  others in the same farm do not. Header parsing accepts both forms so one
-  device cannot shift the H.264 stream by one byte.
+  the 64-byte device metadata header. Header parsing accepts both forms.
+
+  scrcpy 4.x sends stream metadata as a 4-byte codec id followed by a 12-byte
+  video session packet. The session packet begins with the 0x80000000 session
+  flag, followed by the current video width and height. This must be consumed
+  before the raw H.264 stream begins when send_frame_meta=false.
 """
 
 from __future__ import annotations
@@ -54,9 +57,10 @@ from config.constants import (
 from config.paths import adb_exe, scrcpy_jar_path
 
 _BASE_PORT         = 27183
-RECONNECT_ATTEMPTS = 2      # attempts after decode loop dies unexpectedly
-RECONNECT_DELAY_S  = 3.0    # seconds between reconnect attempts
+RECONNECT_ATTEMPTS = 2
+RECONNECT_DELAY_S  = 3.0
 _H264_CODEC_ID     = 0x68323634
+_SESSION_PACKET_FLAG = 0x80000000
 
 
 def _port_for_serial(serial: str) -> int:
@@ -70,8 +74,9 @@ class ScrcpySocketBackend(CaptureBackend):
     """
 
     _DEVICE_SERVER_PATH = "/data/local/tmp/scrcpy-server.jar"
-    _HEADER_SIZE        = 64
-    _VIDEO_HEADER_SIZE  = 12
+    _HEADER_SIZE         = 64
+    _CODEC_HEADER_SIZE   = 4
+    _SESSION_HEADER_SIZE = 12
 
     def __init__(
         self,
@@ -332,16 +337,12 @@ class ScrcpySocketBackend(CaptureBackend):
                 return False
 
             if first_byte == b"\x00":
-                # scrcpy forward-tunnel dummy byte. Consume it, then read the
-                # complete 64-byte device metadata header.
                 device_header = self._recv_exact(self._HEADER_SIZE)
                 app_logger.log(
                     f"[scrcpy] Consumed forward-tunnel dummy byte for {self.serial}",
                     "DEBUG",
                 )
             else:
-                # Devices/sessions without the dummy byte begin directly with
-                # the device metadata. Preserve the byte we already consumed.
                 remainder = self._recv_exact(self._HEADER_SIZE - 1)
                 device_header = first_byte + remainder if remainder else None
 
@@ -353,24 +354,42 @@ class ScrcpySocketBackend(CaptureBackend):
             device_name = device_header.rstrip(b"\x00").decode("utf-8", errors="replace")
             app_logger.log(f"[scrcpy] Device: {device_name}", "INFO")
 
-            video_header = self._recv_exact(self._VIDEO_HEADER_SIZE)
-            if not video_header:
+            codec_header = self._recv_exact(self._CODEC_HEADER_SIZE)
+            if not codec_header:
                 app_logger.log(
-                    f"[scrcpy] Failed to read video header from {self.serial}", "ERROR")
+                    f"[scrcpy] Failed to read codec header from {self.serial}", "ERROR")
                 return False
 
-            codec_id, width, height = struct.unpack(">III", video_header)
+            codec_id = struct.unpack(">I", codec_header)[0]
             if codec_id != _H264_CODEC_ID:
                 app_logger.log(
-                    f"[scrcpy] Invalid video header from {self.serial}: "
-                    f"codec={codec_id:#010x} size={width}x{height}; "
-                    f"expected H264 codec={_H264_CODEC_ID:#010x}",
+                    f"[scrcpy] Invalid codec header from {self.serial}: "
+                    f"codec={codec_id:#010x}; expected H264={_H264_CODEC_ID:#010x}",
+                    "ERROR",
+                )
+                return False
+
+            session_header = self._recv_exact(self._SESSION_HEADER_SIZE)
+            if not session_header:
+                app_logger.log(
+                    f"[scrcpy] Failed to read video session packet from {self.serial}",
+                    "ERROR",
+                )
+                return False
+
+            session_flags, width, height = struct.unpack(">III", session_header)
+            if not (session_flags & _SESSION_PACKET_FLAG):
+                app_logger.log(
+                    f"[scrcpy] Invalid video session packet from {self.serial}: "
+                    f"flags={session_flags:#010x} size={width}x{height}",
                     "ERROR",
                 )
                 return False
 
             app_logger.log(
-                f"[scrcpy] Stream: codec={codec_id:#010x} size={width}x{height}", "INFO")
+                f"[scrcpy] Stream: codec={codec_id:#010x} size={width}x{height}",
+                "INFO",
+            )
             return True
         except Exception as e:
             app_logger.log(f"[scrcpy] read_headers error: {e}", "ERROR")
