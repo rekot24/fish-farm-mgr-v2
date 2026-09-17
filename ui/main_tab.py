@@ -23,6 +23,12 @@ Non-blocking start/stop:
   is re-enabled, and the alert label is set to "Start failed" in red so the
   problem is immediately visible on the card.
 
+ADB state:
+  Status snapshots include adb_connected. A stopped phone whose USB/ADB
+  transport has dropped is shown as ADB DISCONNECTED rather than looking like
+  a normal ready-to-start stopped card, and Start remains disabled until ADB
+  sees the serial again.
+
 Timer smoothness:
   Each card maintains local countdown variables that tick every second via
   Tkinter after(). The worker poll (every loop_interval_s) resyncs the
@@ -52,6 +58,7 @@ _STATE_COLORS: dict[str, tuple[str, str]] = {
     "LOBBY":                   ("#92400e", "#fef3c7"),
     "CRASHED":                 ("#991b1b", "#fee2e2"),
     "DISCONNECTED":            ("#991b1b", "#fee2e2"),
+    "ADB_DISCONNECTED":        ("#991b1b", "#fee2e2"),
     "AUTO_FARM_OFF":           ("#92400e", "#fef3c7"),
     "DEATH_SCREEN":            ("#374151", "#f3f4f6"),
     "NET_REVEAL":              ("#374151", "#f3f4f6"),
@@ -160,7 +167,6 @@ class MainTab(ttk.Frame):
         bind_mousewheel(canvas)
         self._canvas = canvas
 
-        # ---- Debug panel ----
         self._panel_frame = ttk.Frame(self._paned)
 
         panel_header = ttk.Frame(self._panel_frame)
@@ -189,10 +195,6 @@ class MainTab(ttk.Frame):
         self._log_text.tag_configure("ERROR",    foreground="#ef4444")
         self._log_text.tag_configure("CRITICAL", foreground="#dc2626",
                                      font=("Courier", 9, "bold"))
-
-    # ------------------------------------------------------------------
-    # Panel
-    # ------------------------------------------------------------------
 
     def append_log(self, msg: str, level: str) -> None:
         self.after(0, lambda m=msg, l=level: self._do_append(m, l))
@@ -223,10 +225,6 @@ class MainTab(ttk.Frame):
             except Exception:
                 pass
 
-    # ------------------------------------------------------------------
-    # Toolbar
-    # ------------------------------------------------------------------
-
     def _start_all(self) -> None:
         threading.Thread(
             target=self._manager.start_all, daemon=True).start()
@@ -238,10 +236,6 @@ class MainTab(ttk.Frame):
             target=self._manager.stop_all, daemon=True).start()
         for card in self._cards.values():
             card.set_pending("Stopping…")
-
-    # ------------------------------------------------------------------
-    # Refresh
-    # ------------------------------------------------------------------
 
     def refresh(self) -> None:
         all_status = self._manager.get_all_status()
@@ -278,26 +272,8 @@ class MainTab(ttk.Frame):
         self.set_panel_visible(settings.development_mode)
 
 
-# ---------------------------------------------------------------------------
-# DeviceCard
-# ---------------------------------------------------------------------------
-
 class DeviceCard(ttk.Frame):
-    """
-    One card per device.
-
-    Pending state:
-      When Start/Stop is tapped, _pending is set to "Starting…" or
-      "Stopping…" and shown in the alert label immediately. resync()
-      clears _pending as soon as the worker's running state changes to
-      match the expected outcome. This gives instant UI feedback with
-      zero app freeze.
-
-      If "Starting…" persists beyond settings.start_timeout_s without
-      running becoming True, the pending state is cleared, the button is
-      re-enabled, and the alert label shows "Start failed" in red. The
-      alert persists until the user retries or the card state changes.
-    """
+    """One card per device."""
 
     def __init__(self, parent, serial, manager, get_devices, save_devices_fn):
         super().__init__(parent, relief="solid", borderwidth=1, padding=10)
@@ -312,9 +288,9 @@ class DeviceCard(ttk.Frame):
         self._lobby_secs: float = 0.0
         self._is_running: bool  = False
         self._current_state: str = ""
-        self._pending: str = ""        # "Starting…" | "Stopping…" | ""
-        self._pending_since: float = 0.0  # monotonic time when pending was set
-        self._start_failed: bool = False  # True after a start timeout
+        self._pending: str = ""
+        self._pending_since: float = 0.0
+        self._start_failed: bool = False
         self._tick_job = None
 
         self._auto_farm_var   = tk.BooleanVar()
@@ -334,10 +310,6 @@ class DeviceCard(ttk.Frame):
 
         self._build()
         self._start_tick()
-
-    # ------------------------------------------------------------------
-    # Build
-    # ------------------------------------------------------------------
 
     def _build(self) -> None:
         header = ttk.Frame(self)
@@ -360,7 +332,6 @@ class DeviceCard(ttk.Frame):
 
         ttk.Separator(self, orient="horizontal").pack(fill="x", pady=(8, 6))
 
-        # Status + alert row
         sa_row = tk.Frame(self)
         sa_row.pack(fill="x", pady=(0, 6))
         self._state_badge = tk.Label(
@@ -374,7 +345,6 @@ class DeviceCard(ttk.Frame):
         )
         self._alert_label.pack(side="left", fill="x", expand=True)
 
-        # Toggle + timer grid
         tg = ttk.Frame(self)
         tg.pack(fill="x", pady=(0, 4))
         tg.columnconfigure(0, weight=1)
@@ -421,12 +391,7 @@ class DeviceCard(ttk.Frame):
                    command=self._open_settings).grid(
             row=0, column=2, sticky="ew", padx=(3, 0))
 
-    # ------------------------------------------------------------------
-    # Pending state
-    # ------------------------------------------------------------------
-
     def set_pending(self, msg: str) -> None:
-        """Show a transient message in the alert label (Starting… / Stopping…)."""
         self._pending = msg
         self._pending_since = time.monotonic()
         self._start_failed = False
@@ -440,15 +405,10 @@ class DeviceCard(ttk.Frame):
         self._start_stop_btn.config(state="normal")
 
     def _set_start_failed(self) -> None:
-        """Called when Starting… times out without the worker confirming running."""
         self._start_failed = True
         self._clear_pending()
         self._alert_label.config(
             text="Start failed", fg=_ALERT_FAILED_FG, bg=_ALERT_FAILED_BG)
-
-    # ------------------------------------------------------------------
-    # Tick
-    # ------------------------------------------------------------------
 
     def _start_tick(self) -> None:
         self._tick_job = self.after(1000, self._tick)
@@ -512,10 +472,6 @@ class DeviceCard(ttk.Frame):
             else:
                 _set(self._lg_lbl, "—", MUTED)
 
-    # ------------------------------------------------------------------
-    # resync
-    # ------------------------------------------------------------------
-
     def resync(self, status: dict, settings: Settings) -> None:
         cfg = self._get_devices().get(self._serial)
         name  = cfg.nickname if cfg and cfg.nickname else self._serial[:8]
@@ -526,15 +482,14 @@ class DeviceCard(ttk.Frame):
         running = status.get("running", False)
         state   = status.get("state", "UNKNOWN")
         runtime = status.get("runtime_s", 0.0)
+        adb_connected = status.get("adb_connected", True)
 
-        # Clear pending once the worker state matches what we expected
         if self._pending == "Starting…" and running:
             self._start_failed = False
             self._clear_pending()
         elif self._pending == "Stopping…" and not running:
             self._clear_pending()
 
-        # Start timeout — "Starting…" stuck with worker still not running
         if (
             self._pending == "Starting…"
             and not running
@@ -549,6 +504,10 @@ class DeviceCard(ttk.Frame):
             self._start_stop_btn.config(
                 text="Stop",
                 state="normal" if not self._pending else "disabled")
+        elif not adb_connected:
+            self._run_badge.config(text="● ADB Offline", fg="#991b1b", bg="#fee2e2")
+            self._runtime_label.config(text="")
+            self._start_stop_btn.config(text="Start", state="disabled")
         else:
             self._run_badge.config(text="● Stopped", fg="#991b1b", bg="#fee2e2")
             self._runtime_label.config(text="")
@@ -558,14 +517,16 @@ class DeviceCard(ttk.Frame):
 
         self._is_running = running
 
-        display_state = state if running else "OFF"
+        display_state = state if running else ("ADB_DISCONNECTED" if not adb_connected else "OFF")
         fg, bg = _STATE_COLORS.get(display_state, ("#374151", "#f3f4f6"))
         self._state_badge.config(text=display_state, fg=fg, bg=bg)
 
-        # Alert label — don't overwrite a pending message or a start-failed notice
         if not self._pending and not self._start_failed:
             alert = _ALERT.get(state) if running else None
-            if state == "LOBBY" and running:
+            if not running and not adb_connected:
+                self._alert_label.config(
+                    text="USB/ADB disconnected", fg="#991b1b", bg="#fee2e2")
+            elif state == "LOBBY" and running:
                 self._alert_label.config(fg="#92400e", bg="#fef3c7")
             elif alert:
                 self._alert_label.config(
@@ -574,7 +535,6 @@ class DeviceCard(ttk.Frame):
                 self._alert_label.config(
                     text="", fg=_ALERT_EMPTY_FG, bg=_ALERT_EMPTY_BG)
 
-        # Clear start-failed notice once the worker actually starts running
         if self._start_failed and running:
             self._start_failed = False
             self._alert_label.config(
@@ -598,10 +558,6 @@ class DeviceCard(ttk.Frame):
             self._stay_awake_var.set(cfg.stay_awake_enabled)
             self._lobby_guard_var.set(cfg.stuck_lobby_detection_enabled)
             self._suppress_toggle = False
-
-    # ------------------------------------------------------------------
-    # Actions
-    # ------------------------------------------------------------------
 
     def _toggle_worker(self) -> None:
         if self._is_running:
