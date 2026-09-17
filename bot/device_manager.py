@@ -4,10 +4,19 @@ bot/device_manager.py
 Manages all connected device workers. Single point of contact between
 the UI and the workers.
 
-get_all_status() now returns an entry for every registered device,
-not just devices with active workers. Devices without workers show
-running=False and state=UNKNOWN so they appear as stopped cards
-on the Main tab immediately after being registered.
+Lifecycle rules:
+  - A registered device card does not create a capture backend by itself.
+  - start_device() creates exactly one worker/backend pair for that device.
+  - stop_device() stops the worker, disconnects scrcpy, removes the backend,
+    and removes the stopped worker object.
+  - start_device() defensively tears down any stale backend left from an older
+    session before creating a fresh one.
+  - stop_all() uses the same per-device teardown path so app exit is clean.
+
+get_all_status() returns an entry for every registered device, not just devices
+with active workers. Devices without workers show running=False and
+state=UNKNOWN so they appear as stopped cards on the Main tab immediately after
+being registered.
 """
 
 from __future__ import annotations
@@ -58,9 +67,31 @@ class DeviceManager:
             return []
 
     def start_device(self, serial: str) -> bool:
-        if serial in self._workers and self._workers[serial].is_running:
+        existing_worker = self._workers.get(serial)
+        if existing_worker and existing_worker.is_running:
             app_logger.log(f"[manager] {serial[:8]} already running", "WARNING")
             return True
+
+        # A stopped card must not retain a live capture backend. This also
+        # cleans up stale state created by older builds where stop_device()
+        # stopped only the worker thread and left scrcpy running.
+        stale_backend = self._backends.pop(serial, None)
+        if stale_backend:
+            app_logger.log(
+                f"[manager] Cleaning stale capture backend before starting {serial[:8]}",
+                "WARNING",
+            )
+            try:
+                stale_backend.disconnect()
+            except Exception as e:
+                app_logger.log(
+                    f"[manager] Error cleaning stale backend for {serial[:8]}: {e}",
+                    "WARNING",
+                )
+
+        # Any non-running worker object is stale; a successful start gets a
+        # fresh worker paired with the fresh backend below.
+        self._workers.pop(serial, None)
 
         settings = self._get_settings()
         devices = self._get_devices()
@@ -71,6 +102,12 @@ class DeviceManager:
         )
         connected = backend.connect()
         if not connected:
+            # connect() normally tears down partial state itself, but keep this
+            # defensive cleanup here so a failed start can never own a backend.
+            try:
+                backend.disconnect()
+            except Exception:
+                pass
             app_logger.log(
                 f"[manager] Failed to connect capture backend for {serial[:8]}", "ERROR"
             )
@@ -94,8 +131,31 @@ class DeviceManager:
         return True
 
     def stop_device(self, serial: str) -> None:
-        if serial in self._workers:
-            self._workers[serial].stop()
+        """Fully stop one device: worker first, then its scrcpy backend."""
+        worker = self._workers.get(serial)
+        if worker:
+            try:
+                worker.stop()
+            except Exception as e:
+                app_logger.log(
+                    f"[manager] Error stopping worker for {serial[:8]}: {e}",
+                    "WARNING",
+                )
+
+        backend = self._backends.pop(serial, None)
+        if backend:
+            try:
+                backend.disconnect()
+            except Exception as e:
+                app_logger.log(
+                    f"[manager] Error disconnecting backend for {serial[:8]}: {e}",
+                    "WARNING",
+                )
+
+        # Remove the stopped worker object only after teardown so status for a
+        # stopped card cannot retain references to an old capture session.
+        self._workers.pop(serial, None)
+        app_logger.log(f"[manager] Fully stopped {serial[:8]}", "INFO")
 
     def _rebuild_backend(self, serial: str) -> bool:
         """
@@ -108,8 +168,9 @@ class DeviceManager:
         app_logger.log(
             f"[manager] Rebuilding scrcpy backend for {serial[:8]}", "WARNING")
 
-        # Tear down the old backend cleanly
-        old = self._backends.get(serial)
+        # Tear down the old backend cleanly and remove it from the manager
+        # before constructing a replacement.
+        old = self._backends.pop(serial, None)
         if old:
             try:
                 old.disconnect()
@@ -125,31 +186,43 @@ class DeviceManager:
         )
         connected = new_backend.connect()
         if not connected:
+            try:
+                new_backend.disconnect()
+            except Exception:
+                pass
             app_logger.log(
                 f"[manager] Backend rebuild failed for {serial[:8]}", "ERROR")
             return False
 
-        self._backends[serial] = new_backend
-
-        # Hand the new backend to the worker so it starts reading frames from it
+        # The worker may have been stopped while a rebuild was in flight. Do
+        # not leave a newly connected backend alive for a stopped card.
         worker = self._workers.get(serial)
-        if worker:
-            worker.replace_capture_backend(new_backend)
+        if not worker or not worker.is_running:
+            new_backend.disconnect()
+            app_logger.log(
+                f"[manager] Discarded rebuilt backend for stopped device {serial[:8]}",
+                "WARNING",
+            )
+            return False
+
+        self._backends[serial] = new_backend
+        worker.replace_capture_backend(new_backend)
 
         app_logger.log(
             f"[manager] Backend rebuilt successfully for {serial[:8]}", "INFO")
         return True
 
     def start_all(self) -> None:
-        """Start workers for all registered devices that are connected."""
+        """Explicitly start workers for all registered devices."""
         devices = self._get_devices()
         for serial in devices:
             self.start_device(serial)
 
     def stop_all(self) -> None:
-        for worker in self._workers.values():
-            if worker.is_running:
-                worker.stop()
+        """Fully tear down every worker/backend pair, including stale backends."""
+        serials = set(self._workers) | set(self._backends)
+        for serial in list(serials):
+            self.stop_device(serial)
 
     def get_all_status(self) -> list[dict]:
         """
