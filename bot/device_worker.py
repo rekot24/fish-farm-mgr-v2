@@ -30,25 +30,23 @@ Tap coordinate resolution (_resolve_tap_coords):
 
 Rejoin navigation is fully state-driven — no Chrome URL, no hardcoded sleeps.
 Each detected state triggers one action that advances to the next state.
+Each handler taps its OWN element — the next cycle detects the resulting screen.
 
 Fast-path rejoin (when 24rolla is visible on home screen):
-  ROBLOX_HOME → tap 24rolla_avatar (tap target) → JOIN_BUTTON detected → tap Join → IN_TANK
+  ROBLOX_HOME → tap 24rolla_avatar (tap target) → JOIN_BUTTON → tap Join → IN_TANK
 
 Fallback rejoin (hamburger menu route):
-  ROBLOX_HOME → tap hamburger_menu (tap target) → HAMBURGER_MENU_OPEN detected
-  → tap continue_playing_button → CONTINUE_PLAYING_BUTTON
-  → tap befish_game_icon → GAME_PAGE → swipe_down_full → GAME_PAGE_SCROLLED
-  → tap servers_button → SERVER_LIST → tap private_server_entry → IN_TANK
+  ROBLOX_HOME → tap hamburger_menu (tap target)
+  → CONTINUE_PLAYING_BUTTON → tap continue_playing_button (tap target)
+  → BEFISH_GAME_ICON → tap befish_game_icon (tap target)
+  → GAME_PAGE → swipe down
+  → GAME_PAGE_SCROLLED → tap servers_button (tap target)
+  → SERVER_LIST → tap private_server_entry (tap target)
+  → IN_TANK
 
 CRASHED state: determined by ADB process check, not image detection.
   Launches Roblox if not running, then falls into ROBLOX_HOME.
 DISCONNECTED state: fires immediately — taps Leave via tap offset. No timer.
-
-Tap-target-only detectors (referenced as plain strings in handlers, never
-as states in _DETECTOR_PRIORITY):
-  "24rolla_avatar", "hamburger_menu" (in _handle_roblox_home),
-  "continue_playing_button", "befish_game_icon", "servers_button",
-  "private_server_entry", "end_run_button", "auto_farm_on"
 """
 
 from __future__ import annotations
@@ -80,8 +78,8 @@ _DETECTOR_PRIORITY = [
     states.DISCONNECTED,
     states.JOIN_BUTTON,
     states.ROBLOX_HOME,
-    states.HAMBURGER_MENU_OPEN,
     states.CONTINUE_PLAYING_BUTTON,
+    states.BEFISH_GAME_ICON,
     states.GAME_PAGE,
     states.GAME_PAGE_SCROLLED,
     states.SERVER_LIST,
@@ -378,10 +376,10 @@ class DeviceWorker:
             self._handle_join_button(cfg, settings)
         elif state == states.ROBLOX_HOME:
             self._handle_roblox_home(cfg, settings)
-        elif state == states.HAMBURGER_MENU_OPEN:
-            self._handle_hamburger_menu_open(cfg, settings)
         elif state == states.CONTINUE_PLAYING_BUTTON:
             self._handle_continue_playing_button(cfg, settings)
+        elif state == states.BEFISH_GAME_ICON:
+            self._handle_befish_game_icon(cfg, settings)
         elif state == states.GAME_PAGE:
             self._handle_game_page(cfg, settings)
         elif state == states.GAME_PAGE_SCROLLED:
@@ -405,6 +403,8 @@ class DeviceWorker:
 
     # ------------------------------------------------------------------
     # State handlers
+    # Each handler taps its OWN element. The next cycle detects the
+    # resulting screen and dispatches to the appropriate next handler.
     # ------------------------------------------------------------------
 
     def _handle_in_tank(self, cfg: DeviceConfig, settings: Settings) -> None:
@@ -481,7 +481,7 @@ class DeviceWorker:
         self._pause_auto_farm_timer()
         self._reset_end_run_timer()
         # "24rolla_avatar" and "hamburger_menu" are tap targets, not states —
-        # referenced as plain strings here, same as all other tap-target-only detectors.
+        # referenced as plain strings, same as all tap-target-only detectors.
         coords = self._resolve_tap_coords(cfg, ["24rolla_avatar"])
         if coords:
             self._log("24rolla visible on home screen — tapping avatar (fast path)", "INFO")
@@ -507,32 +507,32 @@ class DeviceWorker:
         else:
             self._log("join_button coords not resolved", "WARNING")
 
-    def _handle_hamburger_menu_open(self, cfg: DeviceConfig, settings: Settings) -> None:
-        self._unknown_entered_at = None
-        coords = self._resolve_tap_coords(cfg, ["continue_playing_button"])
-        if coords:
-            self._log("Hamburger menu open — tapping Continue Playing", "INFO")
-            tap(self._serial, coords[0], coords[1])
-            self._set_last_action("Tapped Continue Playing")
-        else:
-            self._log("continue_playing_button not found in hamburger menu", "WARNING")
-
     def _handle_continue_playing_button(self, cfg: DeviceConfig,
                                          settings: Settings) -> None:
         self._unknown_entered_at = None
+        coords = self._resolve_tap_coords(cfg, ["continue_playing_button"])
+        if coords:
+            self._log("Continue Playing button visible — tapping it", "INFO")
+            tap(self._serial, coords[0], coords[1])
+            self._set_last_action("Tapped Continue Playing button")
+        else:
+            self._log("continue_playing_button coords not resolved", "WARNING")
+
+    def _handle_befish_game_icon(self, cfg: DeviceConfig, settings: Settings) -> None:
+        self._unknown_entered_at = None
         coords = self._resolve_tap_coords(cfg, ["befish_game_icon"])
         if coords:
-            self._log("Continue Playing screen — tapping Be Fish", "INFO")
+            self._log("Be Fish game icon visible — tapping it", "INFO")
             tap(self._serial, coords[0], coords[1])
             self._set_last_action("Tapped Be Fish game icon")
         else:
-            self._log("befish_game_icon not found on Continue Playing screen", "WARNING")
+            self._log("befish_game_icon coords not resolved", "WARNING")
 
     def _handle_game_page(self, cfg: DeviceConfig, settings: Settings) -> None:
         self._unknown_entered_at = None
-        self._log("Game page — swiping down to reveal Servers button", "INFO")
+        self._log("Game page detected — swiping up to reveal Servers button", "INFO")
         swipe_down_full(self._serial)
-        self._set_last_action("Swiped down on game page")
+        self._set_last_action("Swiped up on game page")
 
     def _handle_game_page_scrolled(self, cfg: DeviceConfig, settings: Settings) -> None:
         self._unknown_entered_at = None
@@ -542,7 +542,7 @@ class DeviceWorker:
             tap(self._serial, coords[0], coords[1])
             self._set_last_action("Tapped Servers button")
         else:
-            self._log("servers_button not found on scrolled game page", "WARNING")
+            self._log("servers_button coords not resolved", "WARNING")
 
     def _handle_server_list(self, cfg: DeviceConfig, settings: Settings) -> None:
         self._unknown_entered_at = None
@@ -552,7 +552,7 @@ class DeviceWorker:
             tap(self._serial, coords[0], coords[1])
             self._set_last_action("Tapped private server entry")
         else:
-            self._log("private_server_entry not found in server list", "WARNING")
+            self._log("private_server_entry coords not resolved", "WARNING")
 
     # ------------------------------------------------------------------
     # Action helpers

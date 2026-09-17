@@ -57,6 +57,8 @@ DETECTOR_NAMES = [
     "hamburger_menu",
     "continue_playing_button",
     "befish_game_icon",
+    "game_page",
+    "game_page_scrolled",
     "servers_button",
     "private_server_entry",
 ]
