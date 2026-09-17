@@ -18,6 +18,12 @@ Lifecycle behavior:
   respawn the server. Remote scrcpy Server/Cleanup app_process instances are
   found by /proc/<pid>/cmdline and killed by PID; this is more reliable across
   Android builds than pkill pattern matching.
+
+Protocol compatibility:
+  scrcpy forward-tunnel sessions may include a single leading dummy byte before
+  the 64-byte device metadata header. Some devices/builds expose it while
+  others in the same farm do not. Header parsing accepts both forms so one
+  device cannot shift the H.264 stream by one byte.
 """
 
 from __future__ import annotations
@@ -50,6 +56,7 @@ from config.paths import adb_exe, scrcpy_jar_path
 _BASE_PORT         = 27183
 RECONNECT_ATTEMPTS = 2      # attempts after decode loop dies unexpectedly
 RECONNECT_DELAY_S  = 3.0    # seconds between reconnect attempts
+_H264_CODEC_ID     = 0x68323634
 
 
 def _port_for_serial(serial: str) -> int:
@@ -149,9 +156,6 @@ class ScrcpySocketBackend(CaptureBackend):
 
     def disconnect(self) -> None:
         """Fully tear down this device's local and remote scrcpy session."""
-        # Set this first. Closing the socket below may wake _decode_loop with
-        # an exception; the flag tells it this is an intentional stop and it
-        # must not auto-reconnect.
         self._stop_event.set()
         self._connected = False
 
@@ -255,8 +259,13 @@ class ScrcpySocketBackend(CaptureBackend):
         try:
             result = self._adb("push", str(self._jar_path), self._DEVICE_SERVER_PATH)
             if result.returncode != 0:
+                stdout = result.stdout.decode("utf-8", errors="replace").strip()
+                stderr = result.stderr.decode("utf-8", errors="replace").strip()
                 app_logger.log(
-                    f"[scrcpy] Failed to push server jar to {self.serial}", "ERROR")
+                    f"[scrcpy] Failed to push server jar to {self.serial}: "
+                    f"rc={result.returncode} stdout={stdout!r} stderr={stderr!r}",
+                    "ERROR",
+                )
                 return False
             return True
         except Exception as e:
@@ -316,11 +325,31 @@ class ScrcpySocketBackend(CaptureBackend):
 
     def _read_headers(self) -> bool:
         try:
-            device_header = self._recv_exact(self._HEADER_SIZE)
+            first_byte = self._recv_exact(1)
+            if not first_byte:
+                app_logger.log(
+                    f"[scrcpy] Failed to read stream prefix from {self.serial}", "ERROR")
+                return False
+
+            if first_byte == b"\x00":
+                # scrcpy forward-tunnel dummy byte. Consume it, then read the
+                # complete 64-byte device metadata header.
+                device_header = self._recv_exact(self._HEADER_SIZE)
+                app_logger.log(
+                    f"[scrcpy] Consumed forward-tunnel dummy byte for {self.serial}",
+                    "DEBUG",
+                )
+            else:
+                # Devices/sessions without the dummy byte begin directly with
+                # the device metadata. Preserve the byte we already consumed.
+                remainder = self._recv_exact(self._HEADER_SIZE - 1)
+                device_header = first_byte + remainder if remainder else None
+
             if not device_header:
                 app_logger.log(
                     f"[scrcpy] Failed to read device header from {self.serial}", "ERROR")
                 return False
+
             device_name = device_header.rstrip(b"\x00").decode("utf-8", errors="replace")
             app_logger.log(f"[scrcpy] Device: {device_name}", "INFO")
 
@@ -329,7 +358,17 @@ class ScrcpySocketBackend(CaptureBackend):
                 app_logger.log(
                     f"[scrcpy] Failed to read video header from {self.serial}", "ERROR")
                 return False
+
             codec_id, width, height = struct.unpack(">III", video_header)
+            if codec_id != _H264_CODEC_ID:
+                app_logger.log(
+                    f"[scrcpy] Invalid video header from {self.serial}: "
+                    f"codec={codec_id:#010x} size={width}x{height}; "
+                    f"expected H264 codec={_H264_CODEC_ID:#010x}",
+                    "ERROR",
+                )
+                return False
+
             app_logger.log(
                 f"[scrcpy] Stream: codec={codec_id:#010x} size={width}x{height}", "INFO")
             return True
@@ -385,11 +424,9 @@ class ScrcpySocketBackend(CaptureBackend):
 
         app_logger.log(f"[scrcpy] Decode loop ended for {self.serial}", "INFO")
 
-        # Clean stop via disconnect() — do nothing, _connected already False.
         if self._stop_event.is_set():
             return
 
-        # Unexpected EOF/error — attempt reconnect.
         if unexpected_exit or not self._stop_event.is_set():
             self._attempt_reconnect()
 
