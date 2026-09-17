@@ -13,6 +13,11 @@ Lifecycle rules:
     session before creating a fresh one.
   - stop_all() uses the same per-device teardown path so app exit is clean.
 
+ADB behavior:
+  - A device must be present in `adb devices` before scrcpy startup begins.
+  - Status snapshots include adb_connected so the UI can distinguish a normal
+    stopped card from a phone whose USB/ADB transport has dropped.
+
 get_all_status() returns an entry for every registered device, not just devices
 with active workers. Devices without workers show running=False and
 state=UNKNOWN so they appear as stopped cards on the Main tab immediately after
@@ -46,8 +51,8 @@ class DeviceManager:
         self._workers: dict[str, DeviceWorker] = {}
         self._backends: dict[str, ScrcpySocketBackend] = {}
 
-    def discover_devices(self) -> list[str]:
-        """Run bundled adb devices and return connected serials."""
+    def _connected_serials(self, log_result: bool = False) -> set[str]:
+        """Return serials currently reported by bundled `adb devices`."""
         try:
             result = subprocess.run(
                 [adb_exe(), "devices"],
@@ -55,22 +60,39 @@ class DeviceManager:
                 timeout=10.0,
             )
             lines = result.stdout.decode("utf-8", errors="replace").strip().splitlines()
-            serials = []
+            serials: set[str] = set()
             for line in lines[1:]:
                 parts = line.strip().split()
                 if len(parts) >= 2 and parts[1] == "device":
-                    serials.append(parts[0])
-            app_logger.log(f"[manager] Discovered {len(serials)} device(s): {serials}", "INFO")
+                    serials.add(parts[0])
+            if log_result:
+                app_logger.log(
+                    f"[manager] Discovered {len(serials)} device(s): {sorted(serials)}",
+                    "INFO",
+                )
             return serials
         except Exception as e:
             app_logger.log(f"[manager] discover_devices error: {e}", "ERROR")
-            return []
+            return set()
+
+    def discover_devices(self) -> list[str]:
+        """Run bundled adb devices and return connected serials."""
+        return sorted(self._connected_serials(log_result=True))
 
     def start_device(self, serial: str) -> bool:
         existing_worker = self._workers.get(serial)
         if existing_worker and existing_worker.is_running:
             app_logger.log(f"[manager] {serial[:8]} already running", "WARNING")
             return True
+
+        # Fail early with an accurate error instead of letting scrcpy report a
+        # misleading jar-push failure when the USB/ADB transport has dropped.
+        if serial not in self._connected_serials():
+            app_logger.log(
+                f"[manager] Cannot start {serial[:8]} — device is not connected via ADB",
+                "ERROR",
+            )
+            return False
 
         # A stopped card must not retain a live capture backend. This also
         # cleans up stale state created by older builds where stop_device()
@@ -89,8 +111,6 @@ class DeviceManager:
                     "WARNING",
                 )
 
-        # Any non-running worker object is stale; a successful start gets a
-        # fresh worker paired with the fresh backend below.
         self._workers.pop(serial, None)
 
         settings = self._get_settings()
@@ -102,8 +122,6 @@ class DeviceManager:
         )
         connected = backend.connect()
         if not connected:
-            # connect() normally tears down partial state itself, but keep this
-            # defensive cleanup here so a failed start can never own a backend.
             try:
                 backend.disconnect()
             except Exception:
@@ -152,8 +170,6 @@ class DeviceManager:
                     "WARNING",
                 )
 
-        # Remove the stopped worker object only after teardown so status for a
-        # stopped card cannot retain references to an old capture session.
         self._workers.pop(serial, None)
         app_logger.log(f"[manager] Fully stopped {serial[:8]}", "INFO")
 
@@ -161,15 +177,10 @@ class DeviceManager:
         """
         Tear down the existing scrcpy backend for a device and build a fresh
         one in its place. Called by the worker as Level 3 tap-failure recovery.
-
-        Only touches the one device — all other workers are unaffected.
-        Returns True if the new backend connected successfully.
         """
         app_logger.log(
             f"[manager] Rebuilding scrcpy backend for {serial[:8]}", "WARNING")
 
-        # Tear down the old backend cleanly and remove it from the manager
-        # before constructing a replacement.
         old = self._backends.pop(serial, None)
         if old:
             try:
@@ -178,6 +189,14 @@ class DeviceManager:
                 app_logger.log(
                     f"[manager] Error disconnecting old backend for "
                     f"{serial[:8]}: {e}", "WARNING")
+
+        if serial not in self._connected_serials():
+            app_logger.log(
+                f"[manager] Backend rebuild aborted for {serial[:8]} — "
+                f"device is not connected via ADB",
+                "ERROR",
+            )
+            return False
 
         settings = self._get_settings()
         new_backend = ScrcpySocketBackend(
@@ -194,8 +213,6 @@ class DeviceManager:
                 f"[manager] Backend rebuild failed for {serial[:8]}", "ERROR")
             return False
 
-        # The worker may have been stopped while a rebuild was in flight. Do
-        # not leave a newly connected backend alive for a stopped card.
         worker = self._workers.get(serial)
         if not worker or not worker.is_running:
             new_backend.disconnect()
@@ -225,20 +242,18 @@ class DeviceManager:
             self.stop_device(serial)
 
     def get_all_status(self) -> list[dict]:
-        """
-        Return a status snapshot for every registered device.
-        Devices without an active worker show as stopped (running=False).
-        This ensures all registered devices appear on the Main tab
-        immediately, even before their worker is started.
-        """
+        """Return a status snapshot for every registered device."""
         devices = self._get_devices()
+        connected_serials = self._connected_serials()
         result = []
         for serial, cfg in devices.items():
             worker = self._workers.get(serial)
+            adb_connected = serial in connected_serials
             if worker:
-                result.append(worker.get_status())
+                status = worker.get_status()
+                status["adb_connected"] = adb_connected
+                result.append(status)
             else:
-                # Stopped device — return a minimal status dict
                 result.append({
                     "serial": serial,
                     "nickname": cfg.nickname,
@@ -246,6 +261,7 @@ class DeviceManager:
                     "account": cfg.account,
                     "running": False,
                     "state": "UNKNOWN",
+                    "adb_connected": adb_connected,
                     "last_action": "—",
                     "runtime_s": 0.0,
                     "auto_farm_countdown_s": 0.0,
@@ -254,10 +270,13 @@ class DeviceManager:
         return result
 
     def get_status(self, serial: str) -> dict | None:
+        adb_connected = serial in self._connected_serials()
         worker = self._workers.get(serial)
         if worker:
-            return worker.get_status()
-        # Return stopped status for registered but not-started device
+            status = worker.get_status()
+            status["adb_connected"] = adb_connected
+            return status
+
         devices = self._get_devices()
         cfg = devices.get(serial)
         if cfg:
@@ -268,6 +287,7 @@ class DeviceManager:
                 "account": cfg.account,
                 "running": False,
                 "state": "UNKNOWN",
+                "adb_connected": adb_connected,
                 "last_action": "—",
                 "runtime_s": 0.0,
                 "auto_farm_countdown_s": 0.0,
