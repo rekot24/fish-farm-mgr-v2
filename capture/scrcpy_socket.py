@@ -478,7 +478,7 @@ class ScrcpySocketBackend(CaptureBackend):
         for frame in frames:
             self._latest_frame = frame.to_ndarray(format="bgr24")
 
-    def _decode_annexb(self, packet_data: bytes, pts: int) -> None:
+    def _decode_annexb(self, packet_data: bytes) -> None:
         """
         Feed validated Annex-B bytes through FFmpeg's H.264 parser first.
 
@@ -486,13 +486,14 @@ class ScrcpySocketBackend(CaptureBackend):
         boundaries. The parser assembles SPS/PPS/slices into decoder-ready
         packets while keeping scrcpy protocol metadata completely out of the
         elementary stream.
+
+        Do not copy scrcpy's microsecond PTS directly onto PyAV packets here.
+        This capture backend only needs the newest decoded frame, and assigning
+        timestamps without a matching time_base can make FFmpeg reject otherwise
+        valid packets on some platforms/builds.
         """
         parsed_packets = self._decoder.parse(packet_data)
         for parsed in parsed_packets:
-            if parsed.pts is None:
-                parsed.pts = pts
-            if parsed.dts is None:
-                parsed.dts = pts
             self._store_frames(self._decoder.decode(parsed))
 
     def _decode_loop(self) -> None:
@@ -577,11 +578,9 @@ class ScrcpySocketBackend(CaptureBackend):
                 try:
                     if self._h264_packet_format == "avcc":
                         packet = _av_module.Packet(packet_data)
-                        packet.pts = pts
-                        packet.dts = pts
                         self._store_frames(self._decoder.decode(packet))
                     else:
-                        self._decode_annexb(packet_data, pts)
+                        self._decode_annexb(packet_data)
                 except Exception as e:
                     self._decode_error_count += 1
                     if self._decode_error_count <= 5:
