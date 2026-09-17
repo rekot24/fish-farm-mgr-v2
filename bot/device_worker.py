@@ -39,8 +39,8 @@ Fallback rejoin (hamburger menu route):
   ROBLOX_HOME → tap hamburger_menu (tap target)
   → CONTINUE_PLAYING_BUTTON → tap continue_playing_button (tap target)
   → BEFISH_GAME_ICON → tap befish_game_icon (tap target)
-  → GAME_PAGE → swipe down
-  → GAME_PAGE_SCROLLED → tap servers_button (tap target)
+  → GAME_PAGE → swipe up (no tap)
+  → SERVERS_BUTTON → tap servers_button (tap target)
   → SERVER_LIST → tap private_server_entry (tap target)
   → IN_TANK
 
@@ -81,7 +81,7 @@ _DETECTOR_PRIORITY = [
     states.CONTINUE_PLAYING_BUTTON,
     states.BEFISH_GAME_ICON,
     states.GAME_PAGE,
-    states.GAME_PAGE_SCROLLED,
+    states.SERVERS_BUTTON,
     states.SERVER_LIST,
     states.LOBBY,
     states.AUTO_FARM_OFF,
@@ -382,8 +382,8 @@ class DeviceWorker:
             self._handle_befish_game_icon(cfg, settings)
         elif state == states.GAME_PAGE:
             self._handle_game_page(cfg, settings)
-        elif state == states.GAME_PAGE_SCROLLED:
-            self._handle_game_page_scrolled(cfg, settings)
+        elif state == states.SERVERS_BUTTON:
+            self._handle_servers_button(cfg, settings)
         elif state == states.SERVER_LIST:
             self._handle_server_list(cfg, settings)
         elif state == states.LOBBY:
@@ -534,11 +534,11 @@ class DeviceWorker:
         swipe_down_full(self._serial)
         self._set_last_action("Swiped up on game page")
 
-    def _handle_game_page_scrolled(self, cfg: DeviceConfig, settings: Settings) -> None:
+    def _handle_servers_button(self, cfg: DeviceConfig, settings: Settings) -> None:
         self._unknown_entered_at = None
         coords = self._resolve_tap_coords(cfg, ["servers_button"])
         if coords:
-            self._log("Game page scrolled — tapping Servers", "INFO")
+            self._log("Servers button visible — tapping it", "INFO")
             tap(self._serial, coords[0], coords[1])
             self._set_last_action("Tapped Servers button")
         else:
