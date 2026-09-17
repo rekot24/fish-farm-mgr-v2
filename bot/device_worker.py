@@ -59,11 +59,10 @@ from typing import Callable, Optional
 from bot import app_logger, states
 from bot.actions import (
     double_tap,
+    expand_and_scroll_game_page,
     force_stop_roblox,
     launch_roblox,
     stay_awake_tap,
-    swipe_card_up,
-    swipe_down_full,
     tap,
 )
 from capture.base import CaptureBackend
@@ -535,25 +534,20 @@ class DeviceWorker:
 
     def _handle_game_page(self, detect_result, cfg: DeviceConfig, settings: Settings) -> None:
         self._unknown_entered_at = None
-        # Use the detected bbox to calculate swipe coordinates relative to
-        # where the card actually is on screen — works across all device sizes.
-        if detect_result and detect_result.bbox:
-            bx, by, bw, bh = detect_result.bbox
-            card_center_x = bx + bw // 2
-            # Start well below the detected image (inside the card content area)
-            # End well above it (scroll content upward)
-            swipe_start_y = by + bh + 300
-            swipe_end_y   = by - 200
+        # Use the bbox center of the detected game_page image as the focus
+        # point — tapped first to give the card focus before scrolling.
+        if detect_result and detect_result.center:
+            focus_x, focus_y = detect_result.center
             self._log(
-                f"Game page detected at bbox ({bx},{by},{bw},{bh}) — "
-                f"swiping from y={swipe_start_y} to y={swipe_end_y}", "INFO")
-            swipe_card_up(self._serial, swipe_start_y, swipe_end_y, card_center_x)
+                f"Game page detected — expanding card and scrolling to Servers "
+                f"(focus={focus_x},{focus_y})", "INFO")
+            expand_and_scroll_game_page(self._serial, focus_x, focus_y)
         else:
-            # Fallback: no bbox available, log a warning and do nothing.
+            # Fallback: no center available, log a warning and do nothing.
             # Next cycle will re-detect and try again.
-            self._log("Game page: no bbox from detection — skipping swipe", "WARNING")
+            self._log("Game page: no center from detection — skipping scroll", "WARNING")
             return
-        self._set_last_action("Swiped up within game page card")
+        self._set_last_action("Expanded and scrolled game page to Servers")
 
     def _handle_servers_button(self, cfg: DeviceConfig, settings: Settings) -> None:
         self._unknown_entered_at = None

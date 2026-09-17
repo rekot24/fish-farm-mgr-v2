@@ -75,39 +75,57 @@ def launch_roblox(serial: str) -> bool:
     )
 
 
-def swipe_card_up(
+def expand_and_scroll_game_page(
     serial: str,
-    start_y: int,
-    end_y: int,
-    x: int = 540,
+    focus_x: int,
+    focus_y: int,
+    scroll_count: int = 2,
 ) -> bool:
     """
-    Fast upward flick within the game page bottom-sheet card.
+    Expand the Be Fish game page bottom-sheet and scroll to reveal Servers.
 
-    Coordinates are calculated from the detected game_page image bbox so
-    the swipe is always relative to where the card actually is on screen —
-    works correctly across all device screen sizes without hardcoding.
+    After tapping the Be Fish game icon, Roblox shows a half-screen bottom-sheet
+    card. Getting to the Servers button requires three steps:
+
+    1. Tap the card to give it focus (focus_x/y is the center of the detected
+       game_page image bbox — inside the card content area)
+    2. Send a large roll scroll event to expand the card to full screen
+    3. Swipe up multiple times (fast, 300ms) on the now-full-screen page to
+       scroll content up far enough to reveal the Servers button
+
+    300ms swipe duration scrolls the maximum distance per gesture.
+    2 swipes gets Servers into view on a Pixel 6 Pro.
 
     Args:
-        serial  : ADB device serial
-        start_y : Y coordinate to start the swipe (bottom of detected bbox + offset)
-        end_y   : Y coordinate to end the swipe (above the detected bbox)
-        x       : horizontal center of the swipe (defaults to 540 for 1080-wide screens)
-
-    Duration 150ms makes it a flick rather than a drag — critical for bottom
-    sheets which dismiss on slow drags but scroll on fast flicks.
+        serial       : ADB device serial
+        focus_x      : x coordinate to tap (center of detected game_page bbox)
+        focus_y      : y coordinate to tap (center of detected game_page bbox)
+        scroll_count : number of upward swipes after expanding (default 2)
     """
-    return _adb(
-        serial,
-        "shell", "input", "swipe",
-        str(x), str(start_y), str(x), str(end_y), "150",
-    )
+    # Step 1: tap to focus the card
+    tap(serial, focus_x, focus_y)
+    time.sleep(0.3)
+
+    # Step 2: roll to expand bottom-sheet to full screen
+    _adb(serial, "shell", "input", "roll", "0", "-5000")
+    time.sleep(0.5)
+
+    # Step 3: fast swipes up to scroll content to reveal Servers button
+    success = True
+    for _ in range(scroll_count):
+        success = _adb(
+            serial,
+            "shell", "input", "swipe",
+            str(focus_x), "1600", str(focus_x), "400", "300",
+        )
+        time.sleep(0.2)
+
+    return success
 
 
 def swipe_down_full(serial: str) -> bool:
     """
     Swipe from bottom to top of screen — maximum scroll.
-    Used for full-page scrolling where the card is already fully expanded.
     x=540 targets center of a 1080-wide screen.
     """
     return _adb(
