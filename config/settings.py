@@ -56,12 +56,15 @@ class DebugConfig:
 class Settings:
     """All global app settings."""
 
-    double_click_delay_s: float     = DOUBLE_CLICK_DELAY_S
-    lobby_stuck_threshold_s: float  = LOBBY_STUCK_THRESHOLD_S
+    double_click_delay_s: float      = DOUBLE_CLICK_DELAY_S
+    lobby_stuck_threshold_s: float   = LOBBY_STUCK_THRESHOLD_S
     unknown_stuck_threshold_s: float = 60.0
-    loop_interval_s: float          = LOOP_INTERVAL_S
-    adb_failure_threshold: int      = 3   # consecutive "device not found" before worker stops
-    development_mode: bool          = False
+    loop_interval_s: float           = LOOP_INTERVAL_S
+    adb_failure_threshold: int       = 3    # consecutive "device not found" before worker stops
+    tap_failure_threshold: int       = 5    # consecutive tap failures before adb reconnect
+    tap_failure_hard_threshold: int  = 10   # consecutive tap failures before scrcpy rebuild
+    start_timeout_s: float           = 10.0 # seconds before "Starting…" card shows Start failed
+    development_mode: bool           = False
 
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     debug: DebugConfig     = field(default_factory=DebugConfig)

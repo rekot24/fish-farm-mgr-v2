@@ -126,6 +126,20 @@ class SettingsTab(ttk.Frame):
             "Consecutive 'device not found' failures before worker stops.\n"
             "Must be consecutive — any successful contact resets the count.",
         )
+        self._tap_fail_var, _ = str_field(
+            "Tap failure threshold",
+            "Consecutive tap timeouts before attempting ADB reconnect.\n"
+            "Resets to 0 on any successful tap.",
+        )
+        self._tap_fail_hard_var, _ = str_field(
+            "Tap failure hard threshold",
+            "Consecutive tap timeouts before rebuilding the scrcpy backend.\n"
+            "Only reached if ADB reconnect didn't help.",
+        )
+        self._start_timeout_var, _ = str_field(
+            "Worker start timeout (s)",
+            "Seconds before a stuck 'Starting…' card clears and shows 'Start failed'.",
+        )
 
         # ---- Logging (Stream 1 — file) ----
         section("Logging")
@@ -214,6 +228,9 @@ class SettingsTab(ttk.Frame):
         self._unknown_stuck_var.set(str(s.unknown_stuck_threshold_s))
         self._loop_var.set(str(s.loop_interval_s))
         self._adb_fail_var.set(str(s.adb_failure_threshold))
+        self._tap_fail_var.set(str(s.tap_failure_threshold))
+        self._tap_fail_hard_var.set(str(s.tap_failure_hard_threshold))
+        self._start_timeout_var.set(str(s.start_timeout_s))
 
         self._log_to_file_var.set(s.logging.log_to_file)
         self._log_path_var.set(str(s.log_file_path()))
@@ -255,6 +272,9 @@ class SettingsTab(ttk.Frame):
             unknown_stuck_threshold_s=_float(self._unknown_stuck_var, s.unknown_stuck_threshold_s),
             loop_interval_s=_float(self._loop_var, s.loop_interval_s),
             adb_failure_threshold=_int(self._adb_fail_var, s.adb_failure_threshold),
+            tap_failure_threshold=_int(self._tap_fail_var, s.tap_failure_threshold),
+            tap_failure_hard_threshold=_int(self._tap_fail_hard_var, s.tap_failure_hard_threshold),
+            start_timeout_s=_float(self._start_timeout_var, s.start_timeout_s),
             development_mode=dev_mode,
             logging=replace(
                 s.logging,

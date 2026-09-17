@@ -16,6 +16,13 @@ Non-blocking start/stop:
   or "Stopping…". The next poll cycle picks up the real state and clears it.
   The app never freezes waiting for scrcpy to connect or the worker to join.
 
+  If the worker fails to start (e.g. scrcpy backend error), running never
+  becomes True. resync() detects this via a timestamp set when pending was
+  entered: if "Starting…" is still pending after settings.start_timeout_s
+  seconds with running still False, the pending state is cleared, the button
+  is re-enabled, and the alert label is set to "Start failed" in red so the
+  problem is immediately visible on the card.
+
 Timer smoothness:
   Each card maintains local countdown variables that tick every second via
   Tkinter after(). The worker poll (every loop_interval_s) resyncs the
@@ -26,6 +33,7 @@ Timer smoothness:
 from __future__ import annotations
 
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk
 from typing import Callable
@@ -63,10 +71,12 @@ _ALERT: dict[str, tuple[str, str, str]] = {
     "DISCONNECTED": ("Disconnected — attempting reconnect", "#991b1b", "#fee2e2"),
 }
 
-_ALERT_EMPTY_FG = "#9ca3af"
-_ALERT_EMPTY_BG = "#f3f4f6"
+_ALERT_EMPTY_FG   = "#9ca3af"
+_ALERT_EMPTY_BG   = "#f3f4f6"
 _ALERT_PENDING_FG = "#1d4ed8"
 _ALERT_PENDING_BG = "#dbeafe"
+_ALERT_FAILED_FG  = "#991b1b"
+_ALERT_FAILED_BG  = "#fee2e2"
 
 
 def _fmt_secs(s: float) -> str:
@@ -236,6 +246,7 @@ class MainTab(ttk.Frame):
     def refresh(self) -> None:
         all_status = self._manager.get_all_status()
         devices = self._get_devices()
+        settings = self._get_settings()
 
         running = sum(1 for s in all_status if s.get("running"))
         total = len(all_status)
@@ -255,7 +266,7 @@ class MainTab(ttk.Frame):
                     save_devices_fn=self._save_devices,
                 )
                 self._cards[serial] = card
-            self._cards[serial].resync(status)
+            self._cards[serial].resync(status, settings)
 
         for idx, card in enumerate(self._cards.values()):
             row, col = divmod(idx, self._card_columns)
@@ -264,7 +275,6 @@ class MainTab(ttk.Frame):
         for col in range(self._card_columns):
             self._card_frame.columnconfigure(col, weight=1)
 
-        settings = self._get_settings()
         self.set_panel_visible(settings.development_mode)
 
 
@@ -282,6 +292,11 @@ class DeviceCard(ttk.Frame):
       clears _pending as soon as the worker's running state changes to
       match the expected outcome. This gives instant UI feedback with
       zero app freeze.
+
+      If "Starting…" persists beyond settings.start_timeout_s without
+      running becoming True, the pending state is cleared, the button is
+      re-enabled, and the alert label shows "Start failed" in red. The
+      alert persists until the user retries or the card state changes.
     """
 
     def __init__(self, parent, serial, manager, get_devices, save_devices_fn):
@@ -297,7 +312,9 @@ class DeviceCard(ttk.Frame):
         self._lobby_secs: float = 0.0
         self._is_running: bool  = False
         self._current_state: str = ""
-        self._pending: str = ""   # "Starting…" | "Stopping…" | ""
+        self._pending: str = ""        # "Starting…" | "Stopping…" | ""
+        self._pending_since: float = 0.0  # monotonic time when pending was set
+        self._start_failed: bool = False  # True after a start timeout
         self._tick_job = None
 
         self._auto_farm_var   = tk.BooleanVar()
@@ -411,13 +428,23 @@ class DeviceCard(ttk.Frame):
     def set_pending(self, msg: str) -> None:
         """Show a transient message in the alert label (Starting… / Stopping…)."""
         self._pending = msg
+        self._pending_since = time.monotonic()
+        self._start_failed = False
         self._alert_label.config(
             text=msg, fg=_ALERT_PENDING_FG, bg=_ALERT_PENDING_BG)
         self._start_stop_btn.config(state="disabled")
 
     def _clear_pending(self) -> None:
         self._pending = ""
+        self._pending_since = 0.0
         self._start_stop_btn.config(state="normal")
+
+    def _set_start_failed(self) -> None:
+        """Called when Starting… times out without the worker confirming running."""
+        self._start_failed = True
+        self._clear_pending()
+        self._alert_label.config(
+            text="Start failed", fg=_ALERT_FAILED_FG, bg=_ALERT_FAILED_BG)
 
     # ------------------------------------------------------------------
     # Tick
@@ -478,7 +505,7 @@ class DeviceCard(ttk.Frame):
             if lg_enabled:
                 _set(self._lg_lbl, _fmt_secs(self._lobby_secs),
                      WARN if self._lobby_secs > 30 else NORMAL)
-                if not self._pending:
+                if not self._pending and not self._start_failed:
                     self._alert_label.config(
                         text=f"In lobby for {_fmt_secs(self._lobby_secs)}",
                         fg="#92400e", bg="#fef3c7")
@@ -489,7 +516,7 @@ class DeviceCard(ttk.Frame):
     # resync
     # ------------------------------------------------------------------
 
-    def resync(self, status: dict) -> None:
+    def resync(self, status: dict, settings: Settings) -> None:
         cfg = self._get_devices().get(self._serial)
         name  = cfg.nickname if cfg and cfg.nickname else self._serial[:8]
         model = cfg.model    if cfg and cfg.model    else self._serial
@@ -502,9 +529,19 @@ class DeviceCard(ttk.Frame):
 
         # Clear pending once the worker state matches what we expected
         if self._pending == "Starting…" and running:
+            self._start_failed = False
             self._clear_pending()
         elif self._pending == "Stopping…" and not running:
             self._clear_pending()
+
+        # Start timeout — "Starting…" stuck with worker still not running
+        if (
+            self._pending == "Starting…"
+            and not running
+            and self._pending_since > 0
+            and (time.monotonic() - self._pending_since) >= settings.start_timeout_s
+        ):
+            self._set_start_failed()
 
         if running:
             self._run_badge.config(text="● Running", fg="#166534", bg="#dcfce7")
@@ -525,8 +562,8 @@ class DeviceCard(ttk.Frame):
         fg, bg = _STATE_COLORS.get(display_state, ("#374151", "#f3f4f6"))
         self._state_badge.config(text=display_state, fg=fg, bg=bg)
 
-        # Alert label — don't overwrite a pending message
-        if not self._pending:
+        # Alert label — don't overwrite a pending message or a start-failed notice
+        if not self._pending and not self._start_failed:
             alert = _ALERT.get(state) if running else None
             if state == "LOBBY" and running:
                 self._alert_label.config(fg="#92400e", bg="#fef3c7")
@@ -536,6 +573,12 @@ class DeviceCard(ttk.Frame):
             else:
                 self._alert_label.config(
                     text="", fg=_ALERT_EMPTY_FG, bg=_ALERT_EMPTY_BG)
+
+        # Clear start-failed notice once the worker actually starts running
+        if self._start_failed and running:
+            self._start_failed = False
+            self._alert_label.config(
+                text="", fg=_ALERT_EMPTY_FG, bg=_ALERT_EMPTY_BG)
 
         if running:
             self._af_secs    = status.get("auto_farm_countdown_s",  self._af_secs)

@@ -20,6 +20,29 @@ Consecutive ADB failure detection:
   becomes False and the worker treats each None-frame cycle as a failure.
   At threshold the worker stops itself — same behavior as device-not-found.
 
+Tap failure recovery (_handle_tap_failure):
+  The worker tracks how many tap/double_tap calls in a row have returned
+  False (timeout or ADB error). Any successful tap resets the counter to 0.
+
+  Level 1 (tap_failure_threshold, default 5):
+    Call adb_reconnect() — restarts the ADB transport layer without touching
+    USB or any running apps. Non-disruptive to the game session. Counter
+    resets after the attempt regardless of outcome; the next tap result
+    determines whether escalation continues.
+
+  Level 3 (tap_failure_hard_threshold, default 10):
+    Call reconnect_capture() — tears down and rebuilds the scrcpy backend
+    for this device only. Slightly more disruptive (video stream drops and
+    reconnects) but still leaves the game running. Counter resets after
+    the attempt.
+
+  Stop (hard threshold + rebuild failed):
+    If the backend rebuild also fails, stop the worker. Same behavior as
+    today's device-not-found path. Card shows as Stopped.
+
+  force_stop_roblox / launch_roblox are never called as part of tap failure
+  recovery — those remain reserved for CRASHED / UNKNOWN state handlers only.
+
 Tap coordinate resolution (_resolve_tap_coords):
   1. tap_offset_x/y set on the DetectorAssignment (manual override via
      crop tool amber dot) → use it always, runs detection for bbox origin.
@@ -41,7 +64,7 @@ Fallback rejoin (hamburger menu route):
   → BEFISH_GAME_ICON → tap befish_game_icon (tap target)
   → GAME_PAGE → swipe up (no tap)
   → SERVERS_BUTTON → tap servers_button (tap target)
-  → PRIVATE_SERVER_ENTRY → tap private_server_entry (its own element)
+  → SERVER_LIST → tap private_server_entry (tap target)
   → IN_TANK
 
 CRASHED state: determined by ADB process check, not image detection.
@@ -58,6 +81,7 @@ from typing import Callable, Optional
 
 from bot import app_logger, states
 from bot.actions import (
+    adb_reconnect,
     double_tap,
     expand_and_scroll_game_page,
     force_stop_roblox,
@@ -82,7 +106,7 @@ _DETECTOR_PRIORITY = [
     states.BEFISH_GAME_ICON,
     states.GAME_PAGE,
     states.SERVERS_BUTTON,
-    states.PRIVATE_SERVER_ENTRY,
+    states.SERVER_LIST,
     states.LOBBY,
     states.AUTO_FARM_OFF,
     states.DEATH_SCREEN,
@@ -101,12 +125,14 @@ class DeviceWorker:
         template_bank: TemplateBank,
         get_settings: Callable[[], Settings],
         get_device_cfg: Callable[[], DeviceConfig],
+        reconnect_capture: Callable[[], bool],
     ):
         self._serial = device_cfg.serial
         self._capture = capture_backend
         self._bank = template_bank
         self._get_settings = get_settings
         self._get_device_cfg = get_device_cfg
+        self._reconnect_capture = reconnect_capture
 
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -124,6 +150,7 @@ class DeviceWorker:
         self._lobby_entered_at: Optional[float] = None
         self._unknown_entered_at: Optional[float] = None
         self._consecutive_adb_failures: int = 0
+        self._consecutive_tap_failures: int = 0
 
         self._last_frame = None
 
@@ -144,6 +171,7 @@ class DeviceWorker:
             return
         self._stop_event.clear()
         self._consecutive_adb_failures = 0
+        self._consecutive_tap_failures = 0
         self._start_time = time.monotonic()
         self._thread = threading.Thread(
             target=self._run, daemon=True, name=f"worker-{self._serial[:8]}")
@@ -164,7 +192,18 @@ class DeviceWorker:
         self._lobby_entered_at = None
         self._unknown_entered_at = None
         self._consecutive_adb_failures = 0
+        self._consecutive_tap_failures = 0
         self._log("Worker stopped", "INFO")
+
+    def replace_capture_backend(self, backend: CaptureBackend) -> None:
+        """
+        Swap in a freshly connected capture backend. Called by DeviceManager
+        after a successful _rebuild_backend(). The old backend is already
+        disconnected by the time this is called.
+        """
+        self._capture = backend
+        self._latest_frame = None
+        self._log("Capture backend replaced — resuming on new stream", "INFO")
 
     def get_status(self) -> dict:
         cfg = self._get_device_cfg()
@@ -267,6 +306,10 @@ class DeviceWorker:
     # ------------------------------------------------------------------
 
     def _handle_adb_failure(self, settings: Settings) -> bool:
+        """
+        Increment the device-not-found counter. Returns True if the worker
+        should stop (threshold reached).
+        """
         self._consecutive_adb_failures += 1
         threshold = settings.adb_failure_threshold
         self._log(
@@ -283,6 +326,63 @@ class DeviceWorker:
             threading.Thread(target=self.stop, daemon=True).start()
             return True
         return False
+
+    def _handle_tap_failure(self, settings: Settings) -> None:
+        """
+        Increment the consecutive tap failure counter and trigger recovery
+        at the configured thresholds.
+
+        Level 1 (tap_failure_threshold): adb reconnect — restarts ADB
+          transport only. Non-disruptive to the game.
+        Level 3 (tap_failure_hard_threshold): rebuild scrcpy backend — tears
+          down and reconnects the video stream for this device only.
+        Stop: if backend rebuild also fails, stop the worker.
+
+        force_stop_roblox / launch_roblox are never called here — those
+        remain reserved for CRASHED / UNKNOWN state recovery only.
+        """
+        self._consecutive_tap_failures += 1
+        soft = settings.tap_failure_threshold
+        hard = settings.tap_failure_hard_threshold
+
+        self._log(
+            f"Tap failure — consecutive: {self._consecutive_tap_failures} "
+            f"(soft={soft}, hard={hard})",
+            "WARNING",
+        )
+
+        if self._consecutive_tap_failures == soft:
+            self._log(
+                f"Tap failures reached {soft} — attempting ADB reconnect",
+                "WARNING",
+            )
+            ok = adb_reconnect(self._serial)
+            self._log(
+                f"ADB reconnect {'succeeded' if ok else 'failed'} for {self._serial[:8]}",
+                "INFO" if ok else "WARNING",
+            )
+            # Counter resets after attempt; next tap result drives further escalation
+            self._consecutive_tap_failures = 0
+
+        elif self._consecutive_tap_failures >= hard:
+            self._log(
+                f"Tap failures reached {hard} — rebuilding scrcpy backend",
+                "ERROR",
+            )
+            self._consecutive_tap_failures = 0
+            ok = self._reconnect_capture()
+            if not ok:
+                self._log(
+                    "Backend rebuild failed — stopping worker. "
+                    "Restart manually once device is responding.",
+                    "ERROR",
+                )
+                threading.Thread(target=self.stop, daemon=True).start()
+
+    def _record_tap_success(self) -> None:
+        """Reset the tap failure counter on any successful tap."""
+        if self._consecutive_tap_failures > 0:
+            self._consecutive_tap_failures = 0
 
     # ------------------------------------------------------------------
     # State resolution
@@ -368,9 +468,13 @@ class DeviceWorker:
         if cfg.stay_awake_enabled:
             now = time.monotonic()
             if now - self._last_stay_awake_tap >= cfg.stay_awake_interval_s:
-                stay_awake_tap(self._serial)
+                ok = stay_awake_tap(self._serial)
                 self._last_stay_awake_tap = now
                 self._set_last_action("Stay-awake tap")
+                if ok:
+                    self._record_tap_success()
+                else:
+                    self._handle_tap_failure(settings)
 
         if state == states.DISCONNECTED:
             self._handle_disconnected(cfg, settings)
@@ -388,8 +492,8 @@ class DeviceWorker:
             self._handle_game_page(detect_result, cfg, settings)
         elif state == states.SERVERS_BUTTON:
             self._handle_servers_button(cfg, settings)
-        elif state == states.PRIVATE_SERVER_ENTRY:
-            self._handle_private_server_entry(cfg, settings)
+        elif state == states.SERVER_LIST:
+            self._handle_server_list(cfg, settings)
         elif state == states.LOBBY:
             self._handle_lobby(cfg, settings)
         elif state == states.AUTO_FARM_OFF:
@@ -467,7 +571,7 @@ class DeviceWorker:
         self._unknown_entered_at = None
         self._reset_lobby_timer()
         self._log("Disconnected dialog — tapping Leave", "INFO")
-        self._do_leave_tap(cfg)
+        self._do_leave_tap(cfg, settings)
         self._set_last_action("Tapped Leave (disconnected)")
 
     def _handle_crashed(self, cfg: DeviceConfig, settings: Settings) -> None:
@@ -484,18 +588,24 @@ class DeviceWorker:
         self._reset_lobby_timer()
         self._pause_auto_farm_timer()
         self._reset_end_run_timer()
-        # "24rolla_avatar" and "hamburger_menu" are tap targets, not states —
-        # referenced as plain strings, same as all tap-target-only detectors.
         coords = self._resolve_tap_coords(cfg, ["24rolla_avatar"])
         if coords:
             self._log("24rolla visible on home screen — tapping avatar (fast path)", "INFO")
-            tap(self._serial, coords[0], coords[1])
+            ok = tap(self._serial, coords[0], coords[1])
+            if ok:
+                self._record_tap_success()
+            else:
+                self._handle_tap_failure(settings)
             self._set_last_action("Tapped 24rolla avatar (fast path)")
             return
         coords = self._resolve_tap_coords(cfg, ["hamburger_menu"])
         if coords:
             self._log("24rolla not visible — tapping hamburger menu (fallback path)", "INFO")
-            tap(self._serial, coords[0], coords[1])
+            ok = tap(self._serial, coords[0], coords[1])
+            if ok:
+                self._record_tap_success()
+            else:
+                self._handle_tap_failure(settings)
             self._set_last_action("Tapped hamburger menu (fallback path)")
         else:
             self._log("Neither 24rolla_avatar nor hamburger_menu found on home screen",
@@ -506,7 +616,11 @@ class DeviceWorker:
         coords = self._resolve_tap_coords(cfg, ["join_button"])
         if coords:
             self._log("Join button visible — tapping Join", "INFO")
-            tap(self._serial, coords[0], coords[1])
+            ok = tap(self._serial, coords[0], coords[1])
+            if ok:
+                self._record_tap_success()
+            else:
+                self._handle_tap_failure(settings)
             self._set_last_action("Tapped Join button")
         else:
             self._log("join_button coords not resolved", "WARNING")
@@ -517,7 +631,11 @@ class DeviceWorker:
         coords = self._resolve_tap_coords(cfg, ["continue_playing_button"])
         if coords:
             self._log("Continue Playing button visible — tapping it", "INFO")
-            tap(self._serial, coords[0], coords[1])
+            ok = tap(self._serial, coords[0], coords[1])
+            if ok:
+                self._record_tap_success()
+            else:
+                self._handle_tap_failure(settings)
             self._set_last_action("Tapped Continue Playing button")
         else:
             self._log("continue_playing_button coords not resolved", "WARNING")
@@ -527,15 +645,17 @@ class DeviceWorker:
         coords = self._resolve_tap_coords(cfg, ["befish_game_icon"])
         if coords:
             self._log("Be Fish game icon visible — tapping it", "INFO")
-            tap(self._serial, coords[0], coords[1])
+            ok = tap(self._serial, coords[0], coords[1])
+            if ok:
+                self._record_tap_success()
+            else:
+                self._handle_tap_failure(settings)
             self._set_last_action("Tapped Be Fish game icon")
         else:
             self._log("befish_game_icon coords not resolved", "WARNING")
 
     def _handle_game_page(self, detect_result, cfg: DeviceConfig, settings: Settings) -> None:
         self._unknown_entered_at = None
-        # Use the bbox center of the detected game_page image as the focus
-        # point — tapped first to give the card focus before scrolling.
         if detect_result and detect_result.center:
             focus_x, focus_y = detect_result.center
             self._log(
@@ -543,8 +663,6 @@ class DeviceWorker:
                 f"(focus={focus_x},{focus_y})", "INFO")
             expand_and_scroll_game_page(self._serial, focus_x, focus_y)
         else:
-            # Fallback: no center available, log a warning and do nothing.
-            # Next cycle will re-detect and try again.
             self._log("Game page: no center from detection — skipping scroll", "WARNING")
             return
         self._set_last_action("Expanded and scrolled game page to Servers")
@@ -554,17 +672,25 @@ class DeviceWorker:
         coords = self._resolve_tap_coords(cfg, ["servers_button"])
         if coords:
             self._log("Servers button visible — tapping it", "INFO")
-            tap(self._serial, coords[0], coords[1])
+            ok = tap(self._serial, coords[0], coords[1])
+            if ok:
+                self._record_tap_success()
+            else:
+                self._handle_tap_failure(settings)
             self._set_last_action("Tapped Servers button")
         else:
             self._log("servers_button coords not resolved", "WARNING")
 
-    def _handle_private_server_entry(self, cfg: DeviceConfig, settings: Settings) -> None:
+    def _handle_server_list(self, cfg: DeviceConfig, settings: Settings) -> None:
         self._unknown_entered_at = None
         coords = self._resolve_tap_coords(cfg, ["private_server_entry"])
         if coords:
-            self._log("Private server entry visible — tapping it", "INFO")
-            tap(self._serial, coords[0], coords[1])
+            self._log("Server list open — tapping private server", "INFO")
+            ok = tap(self._serial, coords[0], coords[1])
+            if ok:
+                self._record_tap_success()
+            else:
+                self._handle_tap_failure(settings)
             self._set_last_action("Tapped private server entry")
         else:
             self._log("private_server_entry coords not resolved", "WARNING")
@@ -583,18 +709,26 @@ class DeviceWorker:
                 "WARNING")
             return
         self._log("Auto-farm interval elapsed — double-clicking", "INFO")
-        double_tap(self._serial, coords[0], coords[1],
-                   delay_s=settings.double_click_delay_s)
+        ok = double_tap(self._serial, coords[0], coords[1],
+                        delay_s=settings.double_click_delay_s)
         self._last_auto_farm_tap = time.monotonic()
         self._set_last_action("Auto-farm double-click")
+        if ok:
+            self._record_tap_success()
+        else:
+            self._handle_tap_failure(settings)
 
     def _do_auto_farm_tap(self, cfg: DeviceConfig, settings: Settings) -> None:
         coords = self._resolve_tap_coords(cfg, [states.AUTO_FARM_OFF])
         if coords is None:
             self._log("Auto-farm OFF: no assignment found for auto_farm_off", "WARNING")
             return
-        tap(self._serial, coords[0], coords[1])
+        ok = tap(self._serial, coords[0], coords[1])
         self._set_last_action("Re-enabled auto-farm (single tap)")
+        if ok:
+            self._record_tap_success()
+        else:
+            self._handle_tap_failure(settings)
 
     def _do_end_run(self, cfg: DeviceConfig, settings: Settings) -> None:
         coords = self._resolve_tap_coords(cfg, [states.END_RUN_BUTTON])
@@ -602,17 +736,25 @@ class DeviceWorker:
             self._log("End-run: no assignment found for end_run_button", "WARNING")
             return
         self._log("End-run tap firing", "INFO")
-        tap(self._serial, coords[0], coords[1])
+        ok = tap(self._serial, coords[0], coords[1])
         self._last_end_run_tap = time.monotonic()
         self._set_last_action("End-run tap")
+        if ok:
+            self._record_tap_success()
+        else:
+            self._handle_tap_failure(settings)
 
-    def _do_leave_tap(self, cfg: DeviceConfig) -> None:
+    def _do_leave_tap(self, cfg: DeviceConfig, settings: Settings) -> None:
         coords = self._resolve_tap_coords(cfg, [states.DISCONNECTED])
         if coords is None:
             self._log("Leave: no tap offset assigned for disconnected detector", "WARNING")
             return
-        tap(self._serial, coords[0], coords[1])
+        ok = tap(self._serial, coords[0], coords[1])
         self._set_last_action("Tapped Leave")
+        if ok:
+            self._record_tap_success()
+        else:
+            self._handle_tap_failure(settings)
 
     def _resolve_tap_coords(
         self,

@@ -65,6 +65,17 @@ def stay_awake_tap(serial: str) -> bool:
     return tap(serial, STAY_AWAKE_TAP_X, STAY_AWAKE_TAP_Y)
 
 
+def adb_reconnect(serial: str) -> bool:
+    """
+    Issue 'adb reconnect' for a specific device — restarts the ADB transport
+    layer without touching the USB connection or any running apps.
+
+    Used as Level 1 recovery when the ADB command channel is frozen but the
+    scrcpy video stream is still alive. Fast and non-disruptive to the game.
+    """
+    return _adb(serial, "reconnect", timeout=15.0)
+
+
 def launch_roblox(serial: str) -> bool:
     return _adb(
         serial,
@@ -118,7 +129,7 @@ def expand_and_scroll_game_page(
             "shell", "input", "swipe",
             str(focus_x), "1600", str(focus_x), "400", "300",
         )
-        time.sleep(0.4)
+        time.sleep(0.2)
 
     return success
 
