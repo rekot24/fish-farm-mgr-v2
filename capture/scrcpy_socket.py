@@ -26,6 +26,7 @@ except ImportError:
     _AV_AVAILABLE = False
 
 import numpy as np
+import cv2
 
 from capture.base import CaptureBackend
 from bot import app_logger
@@ -474,9 +475,56 @@ class ScrcpySocketBackend(CaptureBackend):
             "INFO",
         )
 
+    def _frame_to_bgr(self, frame) -> np.ndarray:
+        """
+        Convert a decoded frame to BGR.
+
+        Prefer PyAV's normal conversion. Some Samsung streams carry color
+        metadata that older/bundled FFmpeg swscale builds reject with errno
+        129 ("Unsupported input"). In that case, extract the decoder's native
+        YUV layout without a colorspace conversion and let OpenCV do the
+        YUV->BGR conversion.
+        """
+        try:
+            return frame.to_ndarray(format="bgr24")
+        except Exception as primary_error:
+            fmt = frame.format.name if frame.format else "unknown"
+            app_logger.log(
+                f"[scrcpy] BGR conversion failed for {self.serial}: "
+                f"format={fmt} size={frame.width}x{frame.height} "
+                f"colorspace={getattr(frame, 'colorspace', None)} "
+                f"primaries={getattr(frame, 'color_primaries', None)} "
+                f"range={getattr(frame, 'color_range', None)}: "
+                f"{type(primary_error).__name__}: {primary_error}; "
+                f"trying OpenCV YUV fallback",
+                "WARNING",
+            )
+
+            native = frame.to_ndarray()
+
+            if fmt in ("yuv420p", "yuvj420p"):
+                return cv2.cvtColor(native, cv2.COLOR_YUV2BGR_I420)
+            if fmt == "nv12":
+                return cv2.cvtColor(native, cv2.COLOR_YUV2BGR_NV12)
+            if fmt == "nv21":
+                return cv2.cvtColor(native, cv2.COLOR_YUV2BGR_NV21)
+
+            # Last fallback: request yuv420p. This may still succeed even when
+            # direct BGR conversion fails because it avoids the problematic
+            # RGB colorspace conversion path.
+            yuv = frame.to_ndarray(format="yuv420p")
+            return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR_I420)
+
     def _store_frames(self, frames) -> None:
         for frame in frames:
-            self._latest_frame = frame.to_ndarray(format="bgr24")
+            try:
+                self._latest_frame = self._frame_to_bgr(frame)
+            except Exception as e:
+                app_logger.log(
+                    f"[scrcpy] Frame conversion error for {self.serial}: "
+                    f"{type(e).__name__}: {e}",
+                    "ERROR",
+                )
 
     def _decode_annexb(self, packet_data: bytes) -> None:
         """
