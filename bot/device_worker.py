@@ -62,6 +62,7 @@ from bot.actions import (
     force_stop_roblox,
     launch_roblox,
     stay_awake_tap,
+    swipe_card_up,
     swipe_down_full,
     tap,
 )
@@ -530,9 +531,9 @@ class DeviceWorker:
 
     def _handle_game_page(self, cfg: DeviceConfig, settings: Settings) -> None:
         self._unknown_entered_at = None
-        self._log("Game page detected — swiping up to reveal Servers button", "INFO")
-        swipe_down_full(self._serial)
-        self._set_last_action("Swiped up on game page")
+        self._log("Game page detected — swiping up within card to reveal Servers button", "INFO")
+        swipe_card_up(self._serial)
+        self._set_last_action("Swiped up within game page card")
 
     def _handle_servers_button(self, cfg: DeviceConfig, settings: Settings) -> None:
         self._unknown_entered_at = None

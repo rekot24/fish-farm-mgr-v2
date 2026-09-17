@@ -75,12 +75,30 @@ def launch_roblox(serial: str) -> bool:
     )
 
 
+def swipe_card_up(serial: str) -> bool:
+    """
+    Swipe upward within the game page bottom-sheet card.
+
+    After tapping the Be Fish game icon, Roblox shows a half-screen card
+    from the bottom. Swiping from the middle of that card upward scrolls
+    its content to reveal the Servers button — without starting so low
+    that the gesture lands below the card and dismisses it instead.
+
+    Start y=1400 (mid-card), end y=400 (near top), duration 500ms.
+    x=540 targets center of a 1080-wide screen.
+    """
+    return _adb(
+        serial,
+        "shell", "input", "swipe",
+        "540", "1400", "540", "400", "500",
+    )
+
+
 def swipe_down_full(serial: str) -> bool:
     """
-    Swipe from bottom to top of screen — maximum downward scroll.
-    Used on GAME_PAGE to scroll down until the Servers button is visible at
-    the top of the screen. Duration 600ms keeps it smooth without overshooting.
-    x=540 targets center of a 1080-wide screen; adjust if devices differ.
+    Swipe from bottom to top of screen — maximum scroll.
+    Used for full-page scrolling where the card is already fully expanded.
+    x=540 targets center of a 1080-wide screen.
     """
     return _adb(
         serial,
