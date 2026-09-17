@@ -24,9 +24,9 @@ Protocol compatibility:
   metadata. Stream metadata is parsed using the scrcpy 4.x layout: codec id
   followed by a 12-byte video session packet. Media frame metadata is retained
   so packet boundaries from MediaCodec are preserved across hardware encoders.
-  H264 codec-config packets are applied as decoder extradata rather than being
-  decoded as video frames; both Annex-B and AVCDecoderConfigurationRecord
-  (AVCC) encoder output are supported.
+  H264 codec-config packets are handled according to format: AVCC is installed
+  as decoder extradata, while Annex-B SPS/PPS remains in-band and is prepended
+  to keyframes so FFmpeg sees a normal Annex-B elementary stream.
 """
 
 from __future__ import annotations
@@ -102,6 +102,7 @@ class ScrcpySocketBackend(CaptureBackend):
         self._decode_error_count = 0
         self._packet_count = 0
         self._h264_packet_format: str | None = None
+        self._h264_annexb_config: bytes | None = None
 
     def connect(self) -> bool:
         try:
@@ -116,6 +117,7 @@ class ScrcpySocketBackend(CaptureBackend):
             self._decode_error_count = 0
             self._packet_count = 0
             self._h264_packet_format = None
+            self._h264_annexb_config = None
 
             if not self._push_server():
                 self.disconnect()
@@ -201,6 +203,7 @@ class ScrcpySocketBackend(CaptureBackend):
         self._decoder = None
         self._latest_frame = None
         self._h264_packet_format = None
+        self._h264_annexb_config = None
 
     def _adb(self, *args, timeout: float = ADB_DEFAULT_TIMEOUT_S,
              capture: bool = True) -> subprocess.CompletedProcess:
@@ -257,6 +260,7 @@ class ScrcpySocketBackend(CaptureBackend):
         self._decoder = None
         self._latest_frame = None
         self._h264_packet_format = None
+        self._h264_annexb_config = None
 
     def _push_server(self) -> bool:
         try:
@@ -426,22 +430,24 @@ class ScrcpySocketBackend(CaptureBackend):
         return payload
 
     def _apply_h264_config(self, payload: bytes) -> None:
-        """Create a fresh decoder configured for this encoder's H264 packet format."""
-        # AVCDecoderConfigurationRecord (avcC) starts with configurationVersion=1.
-        # In that mode FFmpeg expects the following access units to remain
-        # length-prefixed, so do not convert media packets to Annex-B.
+        """Configure a fresh decoder for this encoder's H264 packet format."""
         if payload and payload[0] == 1:
-            config = payload
+            # AVCDecoderConfigurationRecord (avcC). FFmpeg uses this extradata
+            # to interpret following length-prefixed access units.
             self._h264_packet_format = "avcc"
+            self._h264_annexb_config = None
+            decoder = _av_module.CodecContext.create("h264", "r")
+            decoder.extradata = payload
+            self._decoder = decoder
         else:
-            config = self._normalize_h264_payload(payload)
+            # Annex-B config is already an elementary stream (typically SPS +
+            # PPS). Keep it in-band instead of forcing it into extradata; some
+            # FFmpeg/PyAV builds reject hardware-encoder Annex-B config there.
             self._h264_packet_format = "annexb"
+            self._h264_annexb_config = self._normalize_h264_payload(payload)
+            self._decoder = _av_module.CodecContext.create("h264", "r")
 
-        decoder = _av_module.CodecContext.create("h264", "r")
-        decoder.extradata = config
-        self._decoder = decoder
         self._decode_error_count = 0
-
         app_logger.log(
             f"[scrcpy] Applied H264 codec config for {self.serial}: "
             f"format={self._h264_packet_format} bytes={len(payload)} "
@@ -497,9 +503,6 @@ class ScrcpySocketBackend(CaptureBackend):
                         "DEBUG",
                     )
 
-                # MediaCodec codec-config packets carry SPS/PPS (or avcC).
-                # They configure the decoder; they are not video frames and
-                # should not be submitted to avcodec_send_packet() as one.
                 if is_config:
                     try:
                         self._apply_h264_config(payload)
@@ -517,6 +520,8 @@ class ScrcpySocketBackend(CaptureBackend):
                     packet_data = payload
                 else:
                     packet_data = self._normalize_h264_payload(payload)
+                    if is_key and self._h264_annexb_config:
+                        packet_data = self._h264_annexb_config + packet_data
 
                 try:
                     packet = _av_module.Packet(packet_data)
@@ -605,6 +610,7 @@ class ScrcpySocketBackend(CaptureBackend):
                 self._decode_error_count = 0
                 self._packet_count = 0
                 self._h264_packet_format = None
+                self._h264_annexb_config = None
 
                 self._decode_thread = threading.Thread(
                     target=self._decode_loop,
