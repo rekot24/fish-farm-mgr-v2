@@ -244,6 +244,14 @@ class DeviceWorker:
 
                 frame = self._capture.get_frame()
                 if frame is None:
+                    if self._capture.is_reconnecting:
+                        # The capture backend is intentionally waiting for a
+                        # transient transport (typically USB/ADB) to recover.
+                        # Do not count this known recovery window as an ADB
+                        # failure or stop the worker prematurely.
+                        time.sleep(settings.loop_interval_s)
+                        continue
+
                     if not self._capture.is_connected:
                         self._log(
                             "Capture backend disconnected — "
