@@ -92,6 +92,7 @@ class ScrcpySocketBackend(CaptureBackend):
         self._packet_count = 0
         self._h264_packet_format: str | None = None
         self._h264_annexb_config: bytes | None = None
+        self._prefer_opencv_yuv = False
 
     def connect(self) -> bool:
         try:
@@ -200,6 +201,7 @@ class ScrcpySocketBackend(CaptureBackend):
         self._packet_count = 0
         self._h264_packet_format = None
         self._h264_annexb_config = None
+        self._prefer_opencv_yuv = False
 
     def _adb(
         self,
@@ -475,45 +477,51 @@ class ScrcpySocketBackend(CaptureBackend):
             "INFO",
         )
 
+    @staticmethod
+    def _opencv_yuv_to_bgr(frame) -> np.ndarray:
+        """Convert common decoder-native YUV layouts to BGR with OpenCV."""
+        fmt = frame.format.name if frame.format else "unknown"
+        native = frame.to_ndarray()
+
+        if fmt in ("yuv420p", "yuvj420p"):
+            return cv2.cvtColor(native, cv2.COLOR_YUV2BGR_I420)
+        if fmt == "nv12":
+            return cv2.cvtColor(native, cv2.COLOR_YUV2BGR_NV12)
+        if fmt == "nv21":
+            return cv2.cvtColor(native, cv2.COLOR_YUV2BGR_NV21)
+
+        # Last fallback: ask PyAV only for planar YUV, not RGB. This avoids
+        # the swscale RGB colorspace path that fails for some Samsung metadata.
+        yuv = frame.to_ndarray(format="yuv420p")
+        return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR_I420)
+
     def _frame_to_bgr(self, frame) -> np.ndarray:
         """
         Convert a decoded frame to BGR.
 
-        Prefer PyAV's normal conversion. Some Samsung streams carry color
-        metadata that older/bundled FFmpeg swscale builds reject with errno
-        129 ("Unsupported input"). In that case, extract the decoder's native
-        YUV layout without a colorspace conversion and let OpenCV do the
-        YUV->BGR conversion.
+        Once FFmpeg's RGB conversion is known to be unsupported for this
+        device/session, stay on the working OpenCV YUV path instead of throwing
+        and logging the same swscale error for every frame.
         """
+        if self._prefer_opencv_yuv:
+            return self._opencv_yuv_to_bgr(frame)
+
         try:
             return frame.to_ndarray(format="bgr24")
         except Exception as primary_error:
             fmt = frame.format.name if frame.format else "unknown"
+            self._prefer_opencv_yuv = True
             app_logger.log(
-                f"[scrcpy] BGR conversion failed for {self.serial}: "
+                f"[scrcpy] FFmpeg BGR conversion unsupported for {self.serial}: "
                 f"format={fmt} size={frame.width}x{frame.height} "
                 f"colorspace={getattr(frame, 'colorspace', None)} "
                 f"primaries={getattr(frame, 'color_primaries', None)} "
                 f"range={getattr(frame, 'color_range', None)}: "
                 f"{type(primary_error).__name__}: {primary_error}; "
-                f"trying OpenCV YUV fallback",
+                f"using OpenCV YUV conversion for this session",
                 "WARNING",
             )
-
-            native = frame.to_ndarray()
-
-            if fmt in ("yuv420p", "yuvj420p"):
-                return cv2.cvtColor(native, cv2.COLOR_YUV2BGR_I420)
-            if fmt == "nv12":
-                return cv2.cvtColor(native, cv2.COLOR_YUV2BGR_NV12)
-            if fmt == "nv21":
-                return cv2.cvtColor(native, cv2.COLOR_YUV2BGR_NV21)
-
-            # Last fallback: request yuv420p. This may still succeed even when
-            # direct BGR conversion fails because it avoids the problematic
-            # RGB colorspace conversion path.
-            yuv = frame.to_ndarray(format="yuv420p")
-            return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR_I420)
+            return self._opencv_yuv_to_bgr(frame)
 
     def _store_frames(self, frames) -> None:
         for frame in frames:
