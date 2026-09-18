@@ -39,6 +39,7 @@ class CaptureBackend(ABC):
         """
         self.serial = serial
         self._connected = False
+        self._reconnecting = False
 
     @abstractmethod
     def connect(self) -> bool:
@@ -73,6 +74,11 @@ class CaptureBackend(ABC):
     @property
     def is_connected(self) -> bool:
         return self._connected
+
+    @property
+    def is_reconnecting(self) -> bool:
+        """True while a backend is actively recovering a lost transport."""
+        return self._reconnecting
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(serial={self.serial!r}, connected={self._connected})"
