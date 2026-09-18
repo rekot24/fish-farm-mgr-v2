@@ -46,6 +46,8 @@ RECONNECT_ATTEMPTS = 3
 RECONNECT_DELAY_S = 2.0
 ADB_RECONNECT_WAIT_S = 30.0
 ADB_RECONNECT_POLL_S = 1.0
+ADB_HEALTHCHECK_TIMEOUT_S = 3.0
+ADB_TRANSPORT_RECOVERY_ATTEMPTS = 2
 
 _H264_CODEC_ID = 0x68323634
 _PACKET_FLAG_SESSION = 1 << 63
@@ -107,6 +109,15 @@ class ScrcpySocketBackend(CaptureBackend):
 
             self._stop_event.clear()
             self._reset_decoder_state()
+
+            if not self._recover_adb_transport():
+                app_logger.log(
+                    f"[scrcpy] ADB transport could not be recovered for "
+                    f"{self.serial}",
+                    "ERROR",
+                )
+                self.disconnect()
+                return False
 
             if not self._push_server():
                 self.disconnect()
@@ -224,6 +235,93 @@ class ScrcpySocketBackend(CaptureBackend):
             )
         except Exception:
             return False
+
+    def _adb_healthy(self) -> bool:
+        """
+        Verify that the transport can execute a real command, not merely that
+        the serial appears in 'adb devices'. A poisoned USB transport may still
+        report state=device while shell/push operations hang.
+        """
+        try:
+            result = self._adb(
+                "shell", "echo", "__fishfarm_adb_ok__",
+                timeout=ADB_HEALTHCHECK_TIMEOUT_S,
+            )
+            if result.returncode != 0:
+                return False
+            output = result.stdout.decode("utf-8", errors="replace")
+            return "__fishfarm_adb_ok__" in output
+        except Exception:
+            return False
+
+    def _recover_adb_transport(self) -> bool:
+        """
+        Recover a device whose ADB transport is present but unresponsive.
+
+        Uses only per-device operations so one flaky handset does not disturb
+        the other phones attached to the same ADB server.
+        """
+        if self._adb_healthy():
+            return True
+
+        app_logger.log(
+            f"[scrcpy] ADB transport unhealthy for {self.serial} — "
+            f"attempting per-device recovery",
+            "WARNING",
+        )
+
+        for attempt in range(1, ADB_TRANSPORT_RECOVERY_ATTEMPTS + 1):
+            if self._stop_event.is_set():
+                return False
+
+            # Ask the host-side ADB server to tear down and recreate this
+            # device transport. Do not use kill-server: that would disrupt
+            # every other connected phone.
+            try:
+                subprocess.run(
+                    [adb_exe(), "-s", self.serial, "reconnect"],
+                    timeout=ADB_HEALTHCHECK_TIMEOUT_S,
+                    capture_output=True,
+                )
+            except Exception:
+                pass
+
+            # If the transport is wedged badly enough that reconnect could not
+            # clear it, request a USB adbd restart as a second per-device nudge.
+            if not self._wait_for_adb_online(timeout_s=10.0):
+                try:
+                    subprocess.run(
+                        [adb_exe(), "-s", self.serial, "usb"],
+                        timeout=ADB_HEALTHCHECK_TIMEOUT_S,
+                        capture_output=True,
+                    )
+                except Exception:
+                    pass
+
+            if self._wait_for_adb_online(timeout_s=ADB_RECONNECT_WAIT_S):
+                # 'device' state can arrive before shell is actually usable.
+                # Give adbd a short settle window and require a real round-trip.
+                health_deadline = time.monotonic() + 10.0
+                while (
+                    not self._stop_event.is_set()
+                    and time.monotonic() < health_deadline
+                ):
+                    if self._adb_healthy():
+                        app_logger.log(
+                            f"[scrcpy] ADB transport recovered for {self.serial}",
+                            "INFO",
+                        )
+                        return True
+                    time.sleep(ADB_RECONNECT_POLL_S)
+
+            app_logger.log(
+                f"[scrcpy] ADB transport recovery attempt "
+                f"{attempt}/{ADB_TRANSPORT_RECOVERY_ATTEMPTS} failed "
+                f"for {self.serial}",
+                "WARNING",
+            )
+
+        return False
 
     def _wait_for_adb_online(self, timeout_s: float = ADB_RECONNECT_WAIT_S) -> bool:
         """Wait for a transient USB/ADB reset without giving up the worker."""
@@ -729,6 +827,15 @@ class ScrcpySocketBackend(CaptureBackend):
                     app_logger.log(
                         f"[scrcpy] ADB did not return for {self.serial} "
                         f"during reconnect attempt {attempt}/{RECONNECT_ATTEMPTS}",
+                        "WARNING",
+                    )
+                    continue
+
+                if not self._recover_adb_transport():
+                    app_logger.log(
+                        f"[scrcpy] ADB returned but remained unhealthy for "
+                        f"{self.serial} during reconnect attempt "
+                        f"{attempt}/{RECONNECT_ATTEMPTS}",
                         "WARNING",
                     )
                     continue
