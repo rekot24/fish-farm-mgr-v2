@@ -42,8 +42,10 @@ from config.constants import (
 from config.paths import adb_exe, scrcpy_jar_path
 
 _BASE_PORT = 27183
-RECONNECT_ATTEMPTS = 2
-RECONNECT_DELAY_S = 3.0
+RECONNECT_ATTEMPTS = 3
+RECONNECT_DELAY_S = 2.0
+ADB_RECONNECT_WAIT_S = 30.0
+ADB_RECONNECT_POLL_S = 1.0
 
 _H264_CODEC_ID = 0x68323634
 _PACKET_FLAG_SESSION = 1 << 63
@@ -211,6 +213,42 @@ class ScrcpySocketBackend(CaptureBackend):
     ) -> subprocess.CompletedProcess:
         cmd = [adb_exe(), "-s", self.serial] + list(args)
         return subprocess.run(cmd, capture_output=capture, timeout=timeout)
+
+    def _adb_online(self) -> bool:
+        """Return True only when this exact device is currently online in ADB."""
+        try:
+            result = self._adb("get-state", timeout=2.0)
+            return (
+                result.returncode == 0
+                and result.stdout.decode("utf-8", errors="replace").strip() == "device"
+            )
+        except Exception:
+            return False
+
+    def _wait_for_adb_online(self, timeout_s: float = ADB_RECONNECT_WAIT_S) -> bool:
+        """Wait for a transient USB/ADB reset without giving up the worker."""
+        deadline = time.monotonic() + timeout_s
+        logged_wait = False
+
+        while not self._stop_event.is_set() and time.monotonic() < deadline:
+            if self._adb_online():
+                if logged_wait:
+                    app_logger.log(
+                        f"[scrcpy] ADB transport recovered for {self.serial}",
+                        "INFO",
+                    )
+                return True
+
+            if not logged_wait:
+                logged_wait = True
+                app_logger.log(
+                    f"[scrcpy] Waiting up to {timeout_s:.0f}s for ADB to return "
+                    f"for {self.serial}",
+                    "WARNING",
+                )
+            time.sleep(ADB_RECONNECT_POLL_S)
+
+        return False
 
     def _kill_remote_scrcpy_processes(self) -> None:
         script = (
@@ -673,83 +711,98 @@ class ScrcpySocketBackend(CaptureBackend):
         if self._stop_event.is_set():
             return
 
+        self._reconnecting = True
         app_logger.log(
             f"[scrcpy] Unexpected disconnect for {self.serial} — "
-            f"attempting reconnect (up to {RECONNECT_ATTEMPTS} attempts)",
+            f"starting transport recovery",
             "WARNING",
         )
 
-        self._reset_transport_for_retry()
+        try:
+            self._reset_transport_for_retry()
 
-        for attempt in range(1, RECONNECT_ATTEMPTS + 1):
-            if self._stop_event.is_set():
-                return
-
-            app_logger.log(
-                f"[scrcpy] Reconnect attempt {attempt}/{RECONNECT_ATTEMPTS} "
-                f"for {self.serial}",
-                "INFO",
-            )
-            time.sleep(RECONNECT_DELAY_S)
-
-            if self._stop_event.is_set():
-                return
-
-            try:
-                if not self._push_server():
-                    self._reset_transport_for_retry()
-                    continue
-                if not self._setup_port_forward():
-                    self._reset_transport_for_retry()
-                    continue
-                if not self._start_server():
-                    self._reset_transport_for_retry()
-                    continue
-
-                time.sleep(SCRCPY_SERVER_BIND_SETTLE_S)
-
+            for attempt in range(1, RECONNECT_ATTEMPTS + 1):
                 if self._stop_event.is_set():
-                    self._reset_transport_for_retry()
                     return
-                if not self._connect_socket():
-                    self._reset_transport_for_retry()
+
+                if not self._wait_for_adb_online():
+                    app_logger.log(
+                        f"[scrcpy] ADB did not return for {self.serial} "
+                        f"during reconnect attempt {attempt}/{RECONNECT_ATTEMPTS}",
+                        "WARNING",
+                    )
                     continue
-                if not self._read_headers():
-                    self._reset_transport_for_retry()
-                    continue
 
-                self._decoder = _av_module.CodecContext.create("h264", "r")
-                self._decode_error_count = 0
-                self._packet_count = 0
-                self._h264_packet_format = None
-                self._h264_annexb_config = None
-
-                self._decode_thread = threading.Thread(
-                    target=self._decode_loop,
-                    daemon=True,
-                    name=f"scrcpy-decode-{self.serial[:8]}",
-                )
-                self._decode_thread.start()
-
-                self._connected = True
                 app_logger.log(
-                    f"[scrcpy] Reconnected to {self.serial} on port {self.local_port}",
+                    f"[scrcpy] Reconnect attempt {attempt}/{RECONNECT_ATTEMPTS} "
+                    f"for {self.serial}",
                     "INFO",
                 )
-                return
 
-            except Exception as e:
-                app_logger.log(
-                    f"[scrcpy] Reconnect attempt {attempt} failed for "
-                    f"{self.serial}: {e}",
-                    "WARNING",
-                )
-                self._reset_transport_for_retry()
+                if attempt > 1:
+                    time.sleep(RECONNECT_DELAY_S)
 
-        self._connected = False
-        self._latest_frame = None
-        app_logger.log(
-            f"[scrcpy] All reconnect attempts failed for {self.serial} — "
-            f"backend disconnected. Worker will stop after failure threshold.",
-            "ERROR",
-        )
+                if self._stop_event.is_set():
+                    return
+
+                try:
+                    if not self._push_server():
+                        self._reset_transport_for_retry()
+                        continue
+                    if not self._setup_port_forward():
+                        self._reset_transport_for_retry()
+                        continue
+                    if not self._start_server():
+                        self._reset_transport_for_retry()
+                        continue
+
+                    time.sleep(SCRCPY_SERVER_BIND_SETTLE_S)
+
+                    if self._stop_event.is_set():
+                        self._reset_transport_for_retry()
+                        return
+                    if not self._connect_socket():
+                        self._reset_transport_for_retry()
+                        continue
+                    if not self._read_headers():
+                        self._reset_transport_for_retry()
+                        continue
+
+                    self._decoder = _av_module.CodecContext.create("h264", "r")
+                    self._decode_error_count = 0
+                    self._packet_count = 0
+                    self._h264_packet_format = None
+                    self._h264_annexb_config = None
+                    self._prefer_opencv_yuv = False
+
+                    self._decode_thread = threading.Thread(
+                        target=self._decode_loop,
+                        daemon=True,
+                        name=f"scrcpy-decode-{self.serial[:8]}",
+                    )
+                    self._decode_thread.start()
+
+                    self._connected = True
+                    app_logger.log(
+                        f"[scrcpy] Reconnected to {self.serial} on port {self.local_port}",
+                        "INFO",
+                    )
+                    return
+
+                except Exception as e:
+                    app_logger.log(
+                        f"[scrcpy] Reconnect attempt {attempt} failed for "
+                        f"{self.serial}: {e}",
+                        "WARNING",
+                    )
+                    self._reset_transport_for_retry()
+
+            self._connected = False
+            self._latest_frame = None
+            app_logger.log(
+                f"[scrcpy] Recovery exhausted for {self.serial} — "
+                f"backend disconnected",
+                "ERROR",
+            )
+        finally:
+            self._reconnecting = False
