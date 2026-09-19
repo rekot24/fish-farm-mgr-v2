@@ -46,10 +46,11 @@ Tap failure recovery (_handle_tap_failure):
 Tap coordinate resolution (_resolve_tap_coords):
   1. tap_offset_x/y set on the DetectorAssignment (manual override via
      crop tool amber dot) → use it always, runs detection for bbox origin.
-  2. cached_tap_x/y set on the DetectorAssignment (persisted from a prior
-     session's first successful match) → use it, no detection needed.
-  3. Neither set → run template match, persist result to devices.json,
-     use it. Subsequent calls skip detection until a new image is assigned.
+  2. cached_tap_x/y set AND always_detect is False → use cached coord,
+     no detection needed.
+  3. Neither condition met (cache empty, or always_detect is True) → run
+     template match live. Persist result only when always_detect is False.
+     Detectors with always_detect=True never write to the cache.
 
 Rejoin navigation is fully state-driven — no Chrome URL, no hardcoded sleeps.
 Each detected state triggers one action that advances to the next state.
@@ -774,8 +775,10 @@ class DeviceWorker:
 
         Priority:
           1. tap_offset_x/y — manual override, always wins. Needs detection for bbox.
-          2. cached_tap_x/y — persisted screen coord. No detection needed.
-          3. Neither set — run template match, persist to devices.json, use result.
+          2. cached_tap_x/y — persisted screen coord, used only when always_detect
+             is False. No detection needed.
+          3. Neither condition met (or always_detect is True) — run template match
+             live. Persist result only when always_detect is False.
         """
         detector_assignments = cfg.detector_assignments
 
@@ -802,15 +805,15 @@ class DeviceWorker:
                             result.bbox[1] + assignment.tap_offset_y)
                 continue
 
-            # Priority 2: persistent cache
-            if assignment.cached_tap_x is not None:
+            # Priority 2: persistent cache (skipped for always_detect detectors)
+            if not assignment.always_detect and assignment.cached_tap_x is not None:
                 self._log(
                     f"[tap_cache] HIT {detector_key} → "
                     f"({assignment.cached_tap_x}, {assignment.cached_tap_y})",
                     "DEBUG")
                 return (assignment.cached_tap_x, assignment.cached_tap_y)
 
-            # Priority 3: cache cold — run detection, persist result
+            # Priority 3: run detection live
             if self._last_frame is None:
                 continue
             result = run_detector_by_name(
@@ -823,20 +826,26 @@ class DeviceWorker:
             )
             if result.found and result.center:
                 x, y = result.center
-                assignment.cached_tap_x = x
-                assignment.cached_tap_y = y
-                try:
-                    all_devices = load_devices()
-                    persisted = all_devices.get(self._serial)
-                    if persisted and detector_key in persisted.detector_assignments:
-                        persisted.detector_assignments[detector_key].cached_tap_x = x
-                        persisted.detector_assignments[detector_key].cached_tap_y = y
-                        save_devices(all_devices)
+                if not assignment.always_detect:
+                    # Cache and persist for detectors with stable positions
+                    assignment.cached_tap_x = x
+                    assignment.cached_tap_y = y
+                    try:
+                        all_devices = load_devices()
+                        persisted = all_devices.get(self._serial)
+                        if persisted and detector_key in persisted.detector_assignments:
+                            persisted.detector_assignments[detector_key].cached_tap_x = x
+                            persisted.detector_assignments[detector_key].cached_tap_y = y
+                            save_devices(all_devices)
+                            self._log(
+                                f"[tap_cache] STORED {detector_key} → ({x}, {y})", "INFO")
+                    except Exception as e:
                         self._log(
-                            f"[tap_cache] STORED {detector_key} → ({x}, {y})", "INFO")
-                except Exception as e:
+                            f"[tap_cache] Failed to persist {detector_key}: {e}", "WARNING")
+                else:
+                    # always_detect: use live result, never cache
                     self._log(
-                        f"[tap_cache] Failed to persist {detector_key}: {e}", "WARNING")
+                        f"[tap_cache] LIVE {detector_key} → ({x}, {y})", "DEBUG")
                 return (x, y)
 
         return None

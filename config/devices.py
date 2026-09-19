@@ -36,11 +36,17 @@ class DetectorAssignment:
                      template match. Populated automatically by the worker
                      on first hit. Cleared when a new image is assigned.
     cached_tap_y   : see cached_tap_x.
+    always_detect  : when True, skip the tap cache entirely — run a live
+                     template match every time and never persist the result.
+                     Use for detectors whose screen position can vary between
+                     cycles (e.g. avatar, game icon, servers button,
+                     private server entry).
 
     Tap priority (in _resolve_tap_coords):
       1. tap_offset_x/y set (manual override via crop tool) → use it always
-      2. cached_tap_x/y set (persisted from prior session)  → use it
-      3. Neither set → run template match, persist result, use it
+      2. cached_tap_x/y set AND always_detect is False → use cached coord
+      3. Neither set (or always_detect is True) → run template match live;
+         persist result only when always_detect is False
     """
     image_filename: Optional[str] = None
     last_tested: Optional[str] = None
@@ -49,6 +55,7 @@ class DetectorAssignment:
     tap_offset_y: Optional[int] = None
     cached_tap_x: Optional[int] = None
     cached_tap_y: Optional[int] = None
+    always_detect: bool = False
 
 
 @dataclass

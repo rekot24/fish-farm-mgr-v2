@@ -100,6 +100,10 @@ class ScrcpySocketBackend(CaptureBackend):
 
     def connect(self) -> bool:
         try:
+            # Clear any stale scrcpy-server process or port forward left over
+            # from a previous failed session before attempting a new connection.
+            self._reset_transport_for_retry()
+            
             if not self._jar_path.exists():
                 app_logger.log(
                     f"[scrcpy] Server jar not found: {self._jar_path}", "ERROR"

@@ -103,7 +103,7 @@ SCRCPY_PORT_RANGE_SIZE = 100
 
 # [INTERNAL] Seconds to wait after starting the scrcpy server before
 # attempting the socket connection. Gives the server time to bind.
-SCRCPY_SERVER_BIND_SETTLE_S = 1.0
+SCRCPY_SERVER_BIND_SETTLE_S = 3.0
 
 # [INTERNAL] Timeout when joining the decode thread on disconnect (seconds).
 SCRCPY_DECODE_THREAD_JOIN_TIMEOUT_S = 5.0
