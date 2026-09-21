@@ -330,20 +330,27 @@ produces. With 5 devices this keeps multiple CPU cores at high utilization conti
 
 - [ ] Add the following named constant to `config/constants.py`, tagged `[TUNABLE]`:
       ```python
-      SCRCPY_DECODE_FRAME_INTERVAL_S: float = 1.0  # [TUNABLE] How long the decode
-                                                     # thread sleeps after storing a
-                                                     # frame. One frame per second is
-                                                     # more than sufficient for a
-                                                     # 5–10s detection loop. Reduce
-                                                     # if faster detection is needed.
+      SCRCPY_DECODE_FRAME_INTERVAL_S: float = 1.0  # [TUNABLE] Minimum time between
+                                                     # BGR conversions of decoded
+                                                     # frames. H.264 decode still runs
+                                                     # on every packet; only the
+                                                     # YUV->BGR conversion is skipped.
+                                                     # One per second is more than
+                                                     # sufficient for a 5–10s
+                                                     # detection loop. Reduce if
+                                                     # faster detection is needed.
       ```
-- [ ] At the end of `_store_frames`, after the last frame in the batch is stored, sleep
-      for `SCRCPY_DECODE_FRAME_INTERVAL_S` using `self._stop_event.wait(timeout=...)` —
-      NOT `time.sleep()`. Using `_stop_event.wait` means the thread wakes immediately
-      when disconnect is requested rather than sleeping through shutdown.
-- [ ] Guard the sleep: only sleep when `frames` is non-empty (the list had at least one
-      decoded frame). If the decoder produced no frames this round, skip the sleep and
-      keep draining buffered packets without stalling. Add a comment explaining this.
+- **Implemented differently from the original plan (2026-09-20).** The original
+      design slept for the interval at the end of `_store_frames`. That runs on the
+      same thread that drains the scrcpy socket, so it would have consumed ~1 packet/s
+      against an encoder producing 10–60/s, letting the backlog grow and
+      `_latest_frame` go stale. Offline benchmark (native phone resolution): BGR
+      conversion ≈ 6–7 ms/frame vs H.264 decode ≈ 1.3–1.9 ms/frame, so the conversion is
+      what is throttled. `_store_frames` skips conversion for any frame arriving within
+      the interval of the last stored one, and never sleeps. `_last_store_at` is
+      initialized to `-inf` and reset in `_reset_decoder_state`, so the first frame after
+      any (re)connect is stored immediately; it advances only after a successful
+      conversion. No `_stop_event.wait` is needed because nothing blocks.
 - [ ] Import `SCRCPY_DECODE_FRAME_INTERVAL_S` from `config/constants.py` in
       `capture/scrcpy_socket.py`. No magic numbers (Layer 13, CLAUDE.md instruction 5).
 

@@ -128,6 +128,15 @@ SCRCPY_PORT_RANGE_SIZE = 100
 # attempting the socket connection. Gives the server time to bind.
 SCRCPY_SERVER_BIND_SETTLE_S = 3.0
 
+# [TUNABLE] Minimum time between BGR conversions of decoded frames (seconds).
+# The decode thread still decodes EVERY H.264 packet (P-frames depend on earlier
+# frames, and pausing the socket read would build a backlog of stale video); it
+# only skips the expensive YUV->BGR conversion for frames arriving inside this
+# window. The worker reads one frame every 5-10s, so 1s is more than enough.
+# Reduce if faster detection is needed. Offline benchmark at native phone
+# resolution: conversion ~6-7 ms/frame vs decode ~1.3-1.9 ms/frame.
+SCRCPY_DECODE_FRAME_INTERVAL_S: float = 1.0
+
 # [INTERNAL] Timeout when joining the decode thread on disconnect (seconds).
 SCRCPY_DECODE_THREAD_JOIN_TIMEOUT_S = 5.0
 
