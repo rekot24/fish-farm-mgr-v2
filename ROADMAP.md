@@ -433,6 +433,28 @@ socket handles.
 - [ ] Reuse the existing `SCRCPY_DECODE_THREAD_JOIN_TIMEOUT_S` constant from
       `config/constants.py` for the join timeout — already defined, do not create a
       duplicate.
+- **Resolved without a code change (2026-09-20) — the join was NOT added.**
+      - `_attempt_reconnect` has exactly one caller: the end of `_decode_loop`
+        (scrcpy_socket.py), so it runs ON the decode thread itself — `self._decode_thread`
+        is the current thread. The snippet above would call `join()` on the running thread
+        and raise `RuntimeError: cannot join current thread` (reproduced against the real
+        `_decode_loop` exit path). That exception escapes `_attempt_reconnect` (its `finally`
+        only clears `_reconnecting`) and kills the decode thread, leaving `_connected` True
+        and `_latest_frame` None — the worker would see None frames forever and never
+        reconnect. Adding the roadmap's code as written would have broken auto-reconnect.
+      - The stated hazard does not occur on the normal path: by the time
+        `_attempt_reconnect` runs, the old read loop has already exited and
+        `_reset_transport_for_retry()` has closed the old socket; the new thread opens a
+        fresh one, and the old thread ends as soon as `_attempt_reconnect` returns. Threads
+        form a chain (T1 → T2 → T3), they do not accumulate, and two threads never read
+        the same socket. (Established by tracing the code, not observed on a device.)
+      - `disconnect()` already handles the join correctly: it joins the decode thread with
+        a `threading.current_thread() is not self._decode_thread` guard and
+        `SCRCPY_DECODE_THREAD_JOIN_TIMEOUT_S`, before `_reset_decoder_state()` runs. Confirmed
+        — nothing to add there.
+      - A guarded join (only when the old thread is a different, live thread) was considered
+        and declined: it would be inert, since the only caller is the decode thread itself.
+        Revisit only if `_attempt_reconnect` is ever called from another thread.
 
 **Files:** `capture/scrcpy_socket.py`
 
