@@ -29,7 +29,7 @@ from PIL import Image, ImageTk
 
 from bot import app_logger
 from config.constants import ADB_DEFAULT_TIMEOUT_S
-from config.devices import DetectorAssignment, DeviceConfig, load_devices, save_devices
+from config.devices import DetectorAssignment, DeviceConfig
 from config.paths import adb_exe, project_root
 
 WINDOW_WIDTH  = 1000
@@ -46,10 +46,20 @@ MAX_ZOOM      = 5.0
 class CropTool(tk.Toplevel):
 
     def __init__(self, parent, serial: str, detector_name: str,
+                 get_devices, save_devices_fn,
                  manager=None, detector_names: list = None):
+        """
+        get_devices / save_devices_fn are the app's device store: get_devices returns the
+        LIVE in-memory dict every worker reads, save_devices_fn persists it. Save edits that
+        dict and saves it through save_devices_fn, so the running workers see the new
+        assignment immediately and a later save from elsewhere cannot overwrite it with a
+        stale copy. This tool never reads or writes devices.json itself.
+        """
         super().__init__(parent)
         self._serial = serial
         self._detector_name = detector_name
+        self._get_devices = get_devices
+        self._save_devices = save_devices_fn
         self._manager = manager
         self._detector_names = detector_names or [
             "disconnected", "crashed", "roblox_home", "lobby",
@@ -700,12 +710,13 @@ class CropTool(tk.Toplevel):
                                  f"Could not write to:\n{save_path}", parent=self)
             return
 
-        devices = load_devices()
+        devices = self._get_devices()          # the LIVE dict — never a disk snapshot
         cfg = devices.get(self._serial)
         if cfg is None:
             cfg = DeviceConfig(serial=self._serial)
             devices[self._serial] = cfg
 
+        existing = cfg.detector_assignments.get(self._detector_name)
         cfg.detector_assignments[self._detector_name] = DetectorAssignment(
             image_filename=filename,
             last_tested=datetime.now(timezone.utc).isoformat(),
@@ -714,8 +725,10 @@ class CropTool(tk.Toplevel):
             tap_offset_y=self._tap_offset[1] if self._tap_offset else None,
             cached_tap_x=None,   # cleared on new image assign
             cached_tap_y=None,
+            # A property of the detector (floating position), not of the image — keep it.
+            always_detect=existing.always_detect if existing else False,
         )
-        save_devices(devices)
+        self._save_devices(devices)
 
         if self._manager is not None:
             self._manager.invalidate_template(self._detector_name, self._serial)

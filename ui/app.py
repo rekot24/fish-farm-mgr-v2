@@ -80,6 +80,7 @@ class App(tk.Tk):
             notebook,
             manager=self._manager,
             get_devices=self._get_devices,
+            save_devices_fn=self._save_devices,
         )
         self._settings_tab = SettingsTab(
             notebook,
