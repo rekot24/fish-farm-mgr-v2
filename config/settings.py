@@ -65,6 +65,9 @@ class Settings:
     tap_failure_hard_threshold: int  = 10   # consecutive tap failures before scrcpy rebuild
     start_timeout_s: float           = 10.0 # seconds before "Starting…" card shows Start failed
     development_mode: bool           = False
+    # Windows only: hide the console window that appears when main.py relaunches
+    # itself elevated. Read at startup, so changes apply on next restart.
+    suppress_launcher_console: bool  = True
 
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     debug: DebugConfig     = field(default_factory=DebugConfig)

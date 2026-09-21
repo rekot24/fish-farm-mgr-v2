@@ -43,6 +43,14 @@ Tap failure recovery (_handle_tap_failure):
   force_stop_roblox / launch_roblox are never called as part of tap failure
   recovery — those remain reserved for CRASHED / UNKNOWN state handlers only.
 
+USB reset recovery (Level 4, Windows — _handle_adb_failure):
+  When consecutive ADB failures reach settings.adb_failure_threshold the device is
+  confirmed unresponsive. Before stopping, the worker calls recover_via_usb_reset()
+  (a DeviceManager callback): USB power cycle, wait for ADB, rebuild the scrcpy
+  backend. If that succeeds the failure counter resets and the worker carries on;
+  if it is skipped (no pnp_instance_id, not elevated, rate-limited) or fails, the
+  worker stops itself exactly as before.
+
 Tap coordinate resolution (_resolve_tap_coords):
   1. tap_offset_x/y set on the DetectorAssignment (manual override via
      crop tool amber dot) → use it always, runs detection for bbox origin.
@@ -51,6 +59,8 @@ Tap coordinate resolution (_resolve_tap_coords):
   3. Neither condition met (cache empty, or always_detect is True) → run
      template match live. Persist result only when always_detect is False.
      Detectors with always_detect=True never write to the cache.
+  The disk write goes through the persist_tap_cache_fn callback owned by
+  DeviceManager (thread-safe); the worker never touches devices.json itself.
 
 Rejoin navigation is fully state-driven — no Chrome URL, no hardcoded sleeps.
 Each detected state triggers one action that advances to the next state.
@@ -91,8 +101,12 @@ from bot.actions import (
     tap,
 )
 from capture.base import CaptureBackend
-from config.constants import DETECTION_THRESHOLD
-from config.devices import DeviceConfig, load_devices, save_devices
+from config.constants import (
+    ADB_FOREGROUND_CHECK_SHELL_CMD,
+    ADB_FOREGROUND_CHECK_TIMEOUT_S,
+    DETECTION_THRESHOLD,
+)
+from config.devices import DeviceConfig
 from config.settings import Settings
 from detection.detector import run_detector_by_name
 from detection.template_bank import TemplateBank
@@ -127,6 +141,8 @@ class DeviceWorker:
         get_settings: Callable[[], Settings],
         get_device_cfg: Callable[[], DeviceConfig],
         reconnect_capture: Callable[[], bool],
+        persist_tap_cache_fn: Callable[[str, str, int, int], None],
+        recover_via_usb_reset_fn: Callable[[], bool],
     ):
         self._serial = device_cfg.serial
         self._capture = capture_backend
@@ -134,6 +150,8 @@ class DeviceWorker:
         self._get_settings = get_settings
         self._get_device_cfg = get_device_cfg
         self._reconnect_capture = reconnect_capture
+        self._persist_tap_cache = persist_tap_cache_fn
+        self._recover_via_usb_reset = recover_via_usb_reset_fn
 
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -316,8 +334,14 @@ class DeviceWorker:
 
     def _handle_adb_failure(self, settings: Settings) -> bool:
         """
-        Increment the device-not-found counter. Returns True if the worker
-        should stop (threshold reached).
+        Increment the device-not-found counter. At the threshold, try USB reset
+        recovery before giving up.
+
+        Returns:
+            True  — the worker should stop (threshold reached and recovery skipped
+                    or failed).
+            False — keep running: below the threshold, or recovery brought the
+                    device back (the counter is reset).
         """
         self._consecutive_adb_failures += 1
         threshold = settings.adb_failure_threshold
@@ -329,7 +353,24 @@ class DeviceWorker:
         if self._consecutive_adb_failures >= threshold:
             self._log(
                 f"Device not found {threshold} times in a row — "
-                f"stopping worker. Restart manually when device is back.",
+                f"trying USB reset recovery before stopping",
+                "ERROR",
+            )
+            recovered = False
+            try:
+                recovered = self._recover_via_usb_reset()
+            except Exception as e:
+                self._log(
+                    f"USB reset recovery raised {type(e).__name__}: {e}", "ERROR")
+                if settings.development_mode:
+                    raise
+            if recovered:
+                self._consecutive_adb_failures = 0
+                self._log("USB reset recovery succeeded — resuming", "INFO")
+                return False
+            self._log(
+                "USB reset recovery unavailable or failed — stopping worker. "
+                "Restart manually when device is back.",
                 "ERROR",
             )
             threading.Thread(target=self.stop, daemon=True).start()
@@ -827,21 +868,12 @@ class DeviceWorker:
             if result.found and result.center:
                 x, y = result.center
                 if not assignment.always_detect:
-                    # Cache and persist for detectors with stable positions
+                    # Cache for detectors with stable positions. In-memory update
+                    # is immediate (only this worker owns this device's cfg);
+                    # the manager serializes the disk write across all workers.
                     assignment.cached_tap_x = x
                     assignment.cached_tap_y = y
-                    try:
-                        all_devices = load_devices()
-                        persisted = all_devices.get(self._serial)
-                        if persisted and detector_key in persisted.detector_assignments:
-                            persisted.detector_assignments[detector_key].cached_tap_x = x
-                            persisted.detector_assignments[detector_key].cached_tap_y = y
-                            save_devices(all_devices)
-                            self._log(
-                                f"[tap_cache] STORED {detector_key} → ({x}, {y})", "INFO")
-                    except Exception as e:
-                        self._log(
-                            f"[tap_cache] Failed to persist {detector_key}: {e}", "WARNING")
+                    self._persist_tap_cache(self._serial, detector_key, x, y)
                 else:
                     # always_detect: use live result, never cache
                     self._log(
@@ -869,26 +901,42 @@ class DeviceWorker:
     # ------------------------------------------------------------------
 
     def _check_roblox_foreground(self):
+        """
+        Check whether Roblox is the foreground app via the device's window focus.
+
+        Returns:
+            True / False           — Roblox is / is not in the foreground. False
+                                     also covers "could not determine" and any
+                                     error or timeout (logged at WARNING).
+            _DEVICE_NOT_FOUND      — ADB reports the device is gone; the caller
+                                     feeds this to the consecutive-failure counter.
+        """
         try:
             from config.paths import adb_exe
+            # Lightweight foreground check — a couple of grep'd focus lines instead
+            # of the full activity stack. 'dumpsys activity activities' was the
+            # previous command; too much output to pull on every None-frame or
+            # no-detector-match cycle. Same answer from ~200 bytes.
             result = subprocess.run(
                 [adb_exe(), "-s", self._serial, "shell",
-                 "dumpsys", "activity", "activities"],
-                capture_output=True, timeout=8.0,
+                 ADB_FOREGROUND_CHECK_SHELL_CMD],
+                capture_output=True, timeout=ADB_FOREGROUND_CHECK_TIMEOUT_S,
             )
             stderr = result.stderr.decode("utf-8", errors="replace")
             if "device not found" in stderr or "device not found" in \
                result.stdout.decode("utf-8", errors="replace"):
                 return _DEVICE_NOT_FOUND
             output = result.stdout.decode("utf-8", errors="replace")
-            for line in output.splitlines():
-                if "mResumedActivity" in line or "ResumedActivity" in line:
-                    is_fg = "com.roblox.client" in line
-                    self._log(
-                        f"Roblox {'is' if is_fg else 'is NOT'} foreground app",
-                        "DEBUG" if is_fg else "WARNING",
-                    )
-                    return is_fg
+            # grep already filtered to mCurrentFocus / mFocusedApp lines on-device.
+            # Multi-display devices emit several (some `=null`), so match any line.
+            focus_lines = [line for line in output.splitlines() if line.strip()]
+            if focus_lines:
+                is_fg = any("com.roblox.client" in line for line in focus_lines)
+                self._log(
+                    f"Roblox {'is' if is_fg else 'is NOT'} foreground app",
+                    "DEBUG" if is_fg else "WARNING",
+                )
+                return is_fg
             self._log("Could not determine foreground app", "WARNING")
             return False
         except Exception as e:

@@ -32,6 +32,7 @@ from capture.base import CaptureBackend
 from bot import app_logger
 from config.constants import (
     ADB_DEFAULT_TIMEOUT_S,
+    SCRCPY_DECODE_FRAME_INTERVAL_S,
     SCRCPY_PORT_RANGE_SIZE,
     SCRCPY_SERVER_BIND_SETTLE_S,
     SCRCPY_DECODE_THREAD_JOIN_TIMEOUT_S,
@@ -89,6 +90,16 @@ class ScrcpySocketBackend(CaptureBackend):
         self._server_proc: subprocess.Popen | None = None
         self._decoder = None
         self._latest_frame: np.ndarray | None = None
+        # Guards _latest_frame swap between decode thread (_store_frames) and
+        # worker thread (get_frame). Held only for assignment/read, not conversion.
+        # A fully built array is already swapped atomically under the GIL and is
+        # never mutated after publishing; the lock makes that hand-off explicit
+        # and keeps it correct if the GIL assumption ever stops holding.
+        # Plain Lock, not RLock: these paths run on different threads and never
+        # re-enter, so RLock would only mask a future deadlock bug.
+        self._frame_lock: threading.Lock = threading.Lock()
+        # monotonic time of the last BGR conversion stored; -inf = none yet
+        self._last_store_at: float = float("-inf")
         self._decode_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
 
@@ -174,7 +185,9 @@ class ScrcpySocketBackend(CaptureBackend):
             return False
 
     def get_frame(self) -> np.ndarray | None:
-        return self._latest_frame
+        """Return the newest stored BGR frame, or None if none is available yet."""
+        with self._frame_lock:
+            return self._latest_frame
 
     def disconnect(self) -> None:
         """Fully tear down this device's local and remote scrcpy session."""
@@ -213,7 +226,9 @@ class ScrcpySocketBackend(CaptureBackend):
 
     def _reset_decoder_state(self) -> None:
         self._decoder = None
-        self._latest_frame = None
+        with self._frame_lock:
+            self._latest_frame = None
+        self._last_store_at = float("-inf")
         self._decode_error_count = 0
         self._packet_count = 0
         self._h264_packet_format = None
@@ -664,9 +679,29 @@ class ScrcpySocketBackend(CaptureBackend):
             return self._opencv_yuv_to_bgr(frame)
 
     def _store_frames(self, frames) -> None:
+        """
+        Keep the newest decoded frame as a BGR array, converting at most once
+        per SCRCPY_DECODE_FRAME_INTERVAL_S.
+
+        The H.264 decode has already happened by the time frames reach here, so
+        skipping a frame costs nothing in stream correctness. Only the expensive
+        YUV->BGR conversion is skipped. This must NOT sleep or block: this runs
+        on the decode thread, which is also the thread that drains the socket.
+        Pausing it would let the scrcpy server's output queue back up and turn
+        _latest_frame into minutes-old video.
+        """
         for frame in frames:
+            if time.monotonic() - self._last_store_at < SCRCPY_DECODE_FRAME_INTERVAL_S:
+                continue
             try:
-                self._latest_frame = self._frame_to_bgr(frame)
+                # Convert OUTSIDE the lock — it is the slow part, and holding the
+                # lock here would block the worker from reading the last good frame.
+                bgr_frame = self._frame_to_bgr(frame)
+                with self._frame_lock:
+                    self._latest_frame = bgr_frame
+                # Advance only after a successful conversion so a failed one is
+                # retried on the very next frame instead of waiting out the window.
+                self._last_store_at = time.monotonic()
             except Exception as e:
                 app_logger.log(
                     f"[scrcpy] Frame conversion error for {self.serial}: "
@@ -909,7 +944,8 @@ class ScrcpySocketBackend(CaptureBackend):
                     self._reset_transport_for_retry()
 
             self._connected = False
-            self._latest_frame = None
+            with self._frame_lock:
+                self._latest_frame = None
             app_logger.log(
                 f"[scrcpy] Recovery exhausted for {self.serial} — "
                 f"backend disconnected",

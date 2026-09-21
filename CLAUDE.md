@@ -44,6 +44,7 @@ If asked to do something that conflicts with those standards, flag it before pro
 - `ui/capture_manager.py` — combined capture + detector management tab
 - `tools/crop_tool.py` — image capture with zoom, square/circle crop, preview
 - `tools/coordinate_finder.py` — ADB coordinate helper utility
+- `tools/usb_pnp.py` — Windows PnP lookup + USB power-cycle via PowerShell (USB reset recovery); also a CLI: `python -m tools.usb_pnp detect|reset <adb_serial>`
 
 ---
 
@@ -85,6 +86,7 @@ Each device card shows:
 - Stuck-in-lobby timer threshold (default 60s)
 - Disconnected screen timer threshold (default 60s)
 - Loop interval (default 5s)
+- Hide console window on launch (Windows) — `suppress_launcher_console`, default on; applies on next restart
 
 ---
 
@@ -113,6 +115,15 @@ Each device card shows:
 - **2026-09-10** Force End Run button on device card — manually fires end-run tap and resets the end-run countdown timer.
 - **2026-09-10** Images organized by detector folder in shared pool; per-device assignment is a pointer into that pool.
 - **2026-09-10** New repo (fish-farm-mgr-v2) — v1 repo (fish-farm-manager) kept intact as reference. Never import from v1; copy files over directly.
+- **2026-09-20** Roadmap items are hypotheses, not specs — verify every prescribed command and premise against the code and real devices before implementing. In Phase 8, 4 of 8 prescriptions were wrong or unnecessary (8-C, 8-D, 8-F, 8-G) and would have broken the app or done nothing.
+- **2026-09-20** The app self-elevates on Windows at startup (one UAC prompt) because USB reset needs admin. `--no-elevate` opts out (IDE debugging); declining UAC keeps the app running unelevated with a WARNING. `_ensure_admin()` runs before settings/logging exist, so it returns a status that `main()` logs afterwards. Considered and rejected a settings-store flag: it would need settings loaded before elevation.
+- **2026-09-20** `suppress_launcher_console` (global setting, default True) hides the elevated relaunch's console window via `SW_HIDE`; verified it hides only the console, not the Tk window. Read straight from settings.json at startup, so it applies on next restart. Trade-off: a startup crash before logging is invisible.
+- **2026-09-20** USB port reset is recovery **Level 4** (worker ladder: 1 = adb reconnect, 3 = scrcpy rebuild). It is wired at the worker's ADB-failure threshold via `DeviceManager.recover_via_usb_reset()` — NOT in `_rebuild_backend`, which is only reached from tap failures and never from a phone dropping off ADB. Skipped when `pnp_instance_id` is blank, the app is not elevated, or the device was already reset in the last 10 minutes (`USB_RESET_MIN_INTERVAL_S`, stops a flapping phone being power-cycled forever).
+- **2026-09-20** The PnP target is the present top-level USB device whose InstanceId ends with the phone's ADB serial (`USB\VID_xxxx&PID_xxxx\<serial>`), not the `&ADB` interface nodes. Per-device `pnp_instance_id` in devices.json (blank = skip); the Device Settings **Detect** button fills it from the ADB serial.
+- **2026-09-20** PowerShell hardening for the elevated process: the InstanceId travels in an environment variable and is format-validated (never interpolated into script source); `-ErrorAction Stop` so failures are non-zero exits; Enable is always attempted (retried once) even if Disable failed; ADB return is polled, not a blind sleep.
+- **2026-09-20** The scrcpy decode thread throttles only the BGR conversion (`SCRCPY_DECODE_FRAME_INTERVAL_S`); it decodes every packet and never sleeps, because it is also the thread that drains the socket.
+- **2026-09-20** Foreground check is `dumpsys window displays | grep -E 'mCurrentFocus|mFocusedApp'` and matches Roblox on ANY returned line (multi-display devices emit `=null` lines first).
+- **2026-09-20** Workers never touch devices.json: tap-coordinate persistence goes through `DeviceManager.persist_tap_cache()` under one lock. The status poll reuses `adb devices` for `ADB_STATUS_CACHE_TTL_S`; `_connected_serials()` is live by default (`use_cache=False`).
 
 ## Tried and rejected
 
@@ -120,18 +131,41 @@ Each device card shows:
 - **2026-09-10** Health monitor — caused ADB contention and device instability in v1. Not needed for private tank.
 - **2026-09-10** Profile system — single behavior set is sufficient; per-device config handles all variation.
 - **2026-09-10** Multi-tab approach for capture + management — replaced with single Device tab + dropdowns.
+- **2026-09-20** Sleeping in `_store_frames` to throttle the decoder (roadmap 8-D) — runs on the socket-draining thread, so it would consume ~1 packet/s against a 10–60/s encoder and turn `_latest_frame` into minutes-old video.
+- **2026-09-20** `dumpsys window windows | grep -m1 -E 'mCurrentFocus|mFocusedApp'` (roadmap 8-C) — the `windows` subset has no focus lines (0 of 8 devices detected the foreground; it would have caused a Roblox relaunch loop) and `-m1` hits `mCurrentFocus=null` first on Android 16/17.
+- **2026-09-20** Joining the old decode thread at the top of `_attempt_reconnect` (roadmap 8-F) — `_attempt_reconnect` runs on that very thread, so `join()` raises `RuntimeError: cannot join current thread` and would break auto-reconnect; the two-threads-one-socket hazard it targets does not occur. A guarded (inert) join was also declined.
+- **2026-09-20** Re-declaring `_reconnecting` in `ScrcpySocketBackend.__init__` (roadmap 8-G) — already initialized in `CaptureBackend.__init__`; the described AttributeError cannot occur.
+- **2026-09-20** The `Get-PnpDevice | Where FriendlyName -like '*Android*'` query for the PnP ID (roadmap 8-H) — returns opaque Samsung `&ADB` interface nodes and stale ghosts, and no Pixels.
+- **2026-09-20** Wiring USB reset inside `_rebuild_backend` (roadmap 8-H) — not on the path a phone dropping off ADB takes (that ends in the worker's ADB-failure stop).
+- **2026-09-20** Unconditional elevation with no opt-out, and a settings-store `require_admin` flag — the former blocks IDE debugging, the latter needs settings loaded before the UAC relaunch. `--no-elevate` was chosen.
 
 ---
 
 ## Current state
 
-- Working: nothing yet — foundation files only
-- In progress: Phase 1 (copy capture/detection files from v1)
-- Known broken: n/a
+- Working: Phases 0–8 complete (see ROADMAP.md). Per-device workers (capture → detect → if/elif state → act) across the fleet on scrcpy capture; state-driven rejoin navigation; crop tool; redesigned UI. Phase 8 long-run stability fixes are in: thread-safe tap-cache persistence (8-A), cached `adb devices` on the status poll (8-B), lightweight foreground check (8-C), throttled BGR conversion in the decode thread (8-D), `_latest_frame` lock (8-E). Windows self-elevation via UAC with `--no-elevate` and a `suppress_launcher_console` setting, and USB port reset recovery (Level 4) with a per-device PnP Instance ID + Detect button (8-H) — the UAC relaunch and `python -m tools.usb_pnp detect|reset` were verified on real hardware.
+- In progress: nothing. Branch `phase-8-long-run-stability` holds all Phase 8 work and is ready for review/merge into `main` (not merged).
+- Known broken / unverified: (1) the Phase 8 goal itself — no reboot needed after 12–18 h — has NOT been confirmed by a long run; (2) the automatic USB-reset path (worker hits ADB-failure threshold → reset → poll → rebuild) is covered by mocked tests only; (3) rejoin navigation is still untested end-to-end on a live crash; (4) open Pending fixes in ROADMAP.md: `_DEVICE_NOT_FOUND` text mismatch (adb prints `device 'X' not found`, so the sentinel likely never fires), `replace_capture_backend` clears the wrong attribute, UI saves not serialized with the tap-cache lock, `get_all_status()` runs adb on the Tk thread, DeviceCard "Starting…" stuck on failed start.
+- Next: review/merge the Phase 8 branch; run an overnight soak to confirm the degradation is gone; then the `_DEVICE_NOT_FOUND` fix (it gates the ADB-failure counter that triggers USB reset).
 
 ---
 
 ## Session log
+
+### 2026-09-20 — Phase 8 (long-run stability), branch `phase-8-long-run-stability`
+Phases 2–7 were built in earlier sessions and are recorded in ROADMAP.md, not here. Worked 8-A → 8-H one item at a time: read the listed files, explained the plan, waited for confirmation, implemented, tested, committed separately. Every roadmap prescription was checked against the code and real devices first.
+- **8-A** `DeviceManager.persist_tap_cache()` + lock; workers no longer read/write devices.json. Tested with 8 concurrent writers.
+- **8-B** `ADB_STATUS_CACHE_TTL_S` (10 s) on the status poll only; `_connected_serials(use_cache=False)` stays live for start/rebuild/discover; failed queries are not cached.
+- **8-C** Built with a corrected command after probing 8 real devices (Android 12–17): the roadmap's `dumpsys window windows | grep -m1 …` matched nothing anywhere. Now `dumpsys window displays | grep -E …`, any-line match.
+- **8-D** Built as a throttle on BGR conversion, not a sleep (the sleep would have starved the socket-draining thread). Offline, ~85 % less decode-thread busy time; not measured live.
+- **8-E** `_frame_lock` around every `_latest_frame` access. Defensive hygiene — the torn read the roadmap described cannot occur.
+- **8-F / 8-G** No code change, findings recorded in ROADMAP (the join would raise `RuntimeError`; `_reconnecting` is already initialized in the base class).
+- **8-H Part 1** `_ensure_admin()` (UAC relaunch, `--no-elevate`, declined UAC keeps running), `suppress_launcher_console` setting + Settings-tab "Startup" section, README. UAC flow confirmed on hardware.
+- **8-H Part 2** `tools/usb_pnp.py`, `pnp_instance_id`, Device Settings field + Detect button, `reset_usb_port` / `recover_via_usb_reset`, wired at the worker's ADB-failure threshold (not `_rebuild_backend`). CLI reset confirmed on hardware (Note 20 Ultra re-enumerated).
+- **Findings logged** in ROADMAP: `_DEVICE_NOT_FOUND` text mismatch, `replace_capture_backend` wrong attribute, unserialized UI saves, adb on the Tk thread, uhubctl for Linux.
+- **Decisions made** (all recorded above): self-elevate with `--no-elevate` opt-out; USB reset = Level 4 at the ADB-failure threshold with a 10-minute per-device rate limit; PnP ID = top-level USB device ending in the ADB serial, env-var-injected and validated; roadmap items are hypotheses to verify first.
+- **Process note:** ROADMAP 8-C, 8-D, 8-F, 8-G and 8-H were rewritten in the check-off pass to describe what was built, not what was prescribed. The whole branch is Phase 8 only; nothing was pushed or merged.
+- Next: see Current state.
 
 ### 2026-09-10 — Session 1
 - Full redesign discussion: scope reduced to private tank only
