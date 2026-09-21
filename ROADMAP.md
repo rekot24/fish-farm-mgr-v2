@@ -646,6 +646,20 @@ is an accepted hard requirement for this app.
       True. Fix: add timeout in resync() — if pending == "Starting…" and not running and
       time since pending > ~10s, clear pending and re-enable button.
 
+- [ ] `_DEVICE_NOT_FOUND` never fires — text mismatch. `_check_roblox_foreground` and
+      `_check_roblox_running` (device_worker.py) detect a dropped device by looking for the
+      literal string "device not found" in adb's output. With `-s <serial>` adb actually
+      prints `adb.exe: device 'SERIAL' not found` (verified with an unknown serial on
+      2026-09-20), which does not contain that substring. Result: a device that has left ADB
+      is treated as "Roblox not running" → CRASHED → `launch_roblox` instead of counting
+      toward `adb_failure_threshold`, so the Phase 7 consecutive-failure auto-stop very likely
+      never triggers through these two paths. Pre-existing; found during Phase 8-C.
+      Fix: match adb's real wording (e.g. a regex like `device '.*' not found|device not
+      found`), put the pattern(s) in config/constants.py, and share one helper between both
+      checks. Also decide whether `error: device offline` (ADB Offline) should count as a
+      failure — it is not matched today either. Check the same assumption in
+      `bot/actions.py` and the capture backends.
+
 ---
 
 ## Future / maybe
