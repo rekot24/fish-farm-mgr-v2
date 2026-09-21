@@ -149,3 +149,37 @@ SCRCPY_SOCKET_CONNECT_ATTEMPT_TIMEOUT_S = 1.0
 
 # [INTERNAL] Sleep between socket connection retry attempts (seconds).
 SCRCPY_SOCKET_RETRY_SLEEP_S = 0.5
+
+# ---------------------------------------------------------------------------
+# Windows admin elevation (main.py)
+# ---------------------------------------------------------------------------
+# USB port reset (Level 3 recovery, Disable/Enable-PnpDevice) needs an elevated
+# process on Windows. main.py self-elevates once at startup via UAC.
+
+# [INTERNAL] Value returned by platform.system() on Windows. Elevation is
+# Windows-only; ctypes.windll does not exist elsewhere.
+PLATFORM_WINDOWS = "Windows"
+
+# [INTERNAL] Command-line flag that skips self-elevation (e.g. when running under
+# an IDE debugger, where the elevated relaunch would be a new, unattached process).
+# The app then runs unelevated and USB reset is unavailable.
+NO_ELEVATE_FLAG = "--no-elevate"
+
+# [INTERNAL] ShellExecuteW verb that triggers the UAC elevation prompt.
+SHELLEXECUTE_VERB_RUNAS = "runas"
+
+# [INTERNAL] ShellExecuteW nShowCmd: SW_SHOWNORMAL - show the window normally.
+SHELLEXECUTE_SW_SHOWNORMAL = 1
+
+# [INTERNAL] ShellExecuteW returns an HINSTANCE; values > 32 mean success and
+# values <= 32 are error codes (e.g. 5 = access denied, which is what a declined
+# UAC prompt produces). Source: Win32 ShellExecute documentation.
+SHELLEXECUTE_MAX_ERROR_CODE = 32
+
+# [INTERNAL] Outcomes reported by main._ensure_admin() and logged once the logger
+# is configured (nothing can be logged at the very top of main.py).
+ELEVATION_STATUS_ADMIN = "admin"                # already running elevated
+ELEVATION_STATUS_NOT_WINDOWS = "not_windows"    # elevation not applicable
+ELEVATION_STATUS_OPTED_OUT = "opted_out"        # NO_ELEVATE_FLAG was passed
+ELEVATION_STATUS_UNKNOWN = "unknown"            # could not determine admin state
+ELEVATION_STATUS_LAUNCH_FAILED = "launch_failed"  # UAC declined or ShellExecuteW error
