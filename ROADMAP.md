@@ -479,6 +479,15 @@ Python raises `AttributeError` because the attribute does not yet exist.
       the name get a short explanation.
 - [ ] No other changes needed — the `finally: self._reconnecting = False` in
       `_attempt_reconnect` already handles the reset correctly.
+- **Resolved without a code change (2026-09-20) — the attribute was NOT re-declared.**
+      `_reconnecting` is already initialized: `CaptureBackend.__init__` (capture/base.py:42)
+      sets `self._reconnecting = False` alongside `self._connected = False`, and
+      `ScrcpySocketBackend.__init__` calls `super().__init__(serial)` as its first line.
+      The `AttributeError` described above cannot occur — a freshly constructed
+      `ScrcpySocketBackend` that has never attempted a reconnect reports
+      `is_reconnecting == False` (verified). The item also assumed `_connected` was declared
+      in `ScrcpySocketBackend.__init__`; it is in the base class too. Re-declaring the flag in
+      the subclass would only duplicate the base initialization.
 
 **Files:** `capture/scrcpy_socket.py`
 
