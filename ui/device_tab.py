@@ -7,6 +7,7 @@ Device tab — device selector, identity/timer editing, add/remove devices.
 from __future__ import annotations
 
 import subprocess
+import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 from dataclasses import replace
@@ -14,6 +15,9 @@ from typing import Callable
 
 from config.devices import DeviceConfig
 from config.paths import adb_exe
+
+# --- UI layout constants (timings; see CLAUDE.md instruction 5) ---
+SCAN_POLL_MS = 100        # how often the UI thread checks whether the `adb devices` scan finished
 
 
 class DeviceTab(ttk.Frame):
@@ -45,8 +49,9 @@ class DeviceTab(ttk.Frame):
 
         ttk.Button(selector_frame, text="Refresh",
                    command=self._refresh_list).pack(side="left", padx=(6, 0))
-        ttk.Button(selector_frame, text="Add device",
-                   command=self._add_device).pack(side="left", padx=(6, 0))
+        self._add_btn = ttk.Button(selector_frame, text="Add device",
+                                   command=self._add_device)
+        self._add_btn.pack(side="left", padx=(6, 0))
         self._remove_btn = ttk.Button(selector_frame, text="Remove",
                                        command=self._remove_device)
         self._remove_btn.pack(side="left", padx=(6, 0))
@@ -122,20 +127,60 @@ class DeviceTab(ttk.Frame):
     # ------------------------------------------------------------------
 
     def _add_device(self) -> None:
+        """
+        Start the "Add device" flow: scan `adb devices`, then offer the unregistered
+        phones. The scan is an ADB call (up to a 10 s timeout), so it runs on a background
+        thread and the UI thread polls for the result — the Tk thread never waits on ADB.
+        The button is disabled while the scan runs so a second click cannot start another.
+        """
+        self._add_btn.config(state="disabled")
+        self._scan_result = None
+        threading.Thread(target=self._scan_adb_devices, name="adb-scan", daemon=True).start()
+        self.after(SCAN_POLL_MS, self._poll_scan)
+
+    def _scan_adb_devices(self) -> None:
+        """
+        Background thread: run `adb devices` and publish either ("ok", stdout) or
+        ("error", exception) for the UI thread to pick up.
+        """
         try:
             result = subprocess.run(
                 [adb_exe(), "devices"], capture_output=True, timeout=10, text=True
             )
+            self._scan_result = ("ok", result.stdout)
         except Exception as e:
-            messagebox.showerror("ADB error",
-                f"Could not run adb devices:\n{e}", parent=self)
-            return
+            self._scan_result = ("error", e)
 
+    @staticmethod
+    def _parse_connected(stdout: str) -> list[str]:
+        """Serials in the "device" state from `adb devices` output."""
         connected = []
-        for line in result.stdout.strip().splitlines()[1:]:
+        for line in stdout.strip().splitlines()[1:]:
             parts = line.strip().split()
             if len(parts) >= 2 and parts[1] == "device":
                 connected.append(parts[0])
+        return connected
+
+    def _poll_scan(self) -> None:
+        """UI thread: wait for the scan, then re-enable the button and show the outcome."""
+        try:
+            if not self.winfo_exists():
+                return
+        except tk.TclError:
+            return  # tab was destroyed while the scan was running
+        outcome = self._scan_result
+        if outcome is None:
+            self.after(SCAN_POLL_MS, self._poll_scan)
+            return
+
+        self._add_btn.config(state="normal")
+        kind, payload = outcome
+        if kind == "error":
+            messagebox.showerror("ADB error",
+                f"Could not run adb devices:\n{payload}", parent=self)
+            return
+
+        connected = self._parse_connected(payload)
 
         if not connected:
             messagebox.showinfo("No devices found",
