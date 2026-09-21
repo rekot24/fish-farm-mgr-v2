@@ -902,10 +902,83 @@ was asked; everything below was measured, not assumed.
 
 ---
 
+## Phase 9 — UI polish & scrcpy viewer
+
+### 9-A  scrcpy live view button per device card
+
+**Problem:** There is no way to visually monitor a device from within the app. Debugging
+detection issues or verifying game state requires a separate terminal command.
+
+**Design:**
+- Each device card gets a "View" button that opens a scrcpy window for that device.
+- Window size is controlled by `scrcpy_window_scale: float` in the settings store
+  (fraction of the device's native resolution). `0.5` = half size, `0.25` = quarter.
+  Translated to scrcpy's `--max-size` flag: `max_size = int(native_long_edge * scale)`.
+- Window title is set to the device nickname via scrcpy's `--window-title` flag so
+  multiple open windows are identifiable at a glance.
+- `scrcpy_window_scale` surfaced in Settings tab under a new "Display" section.
+- Button is disabled (greyed out) when the worker is not running or ADB is offline.
+- scrcpy is launched as a detached subprocess — closing it does not affect the worker
+  or the capture backend (the worker's scrcpy socket is a separate connection).
+- Only one view window per device at a time — if the button is clicked while a window
+  is already open, bring it to focus rather than opening a second one (track the
+  subprocess handle on the card).
+
+**Constants (`config/constants.py`):**
+- `SCRCPY_VIEW_WINDOW_SCALE: float = 0.5`  `[TUNABLE]` — default half native resolution.
+  Comment: fraction of native long-edge resolution passed to scrcpy `--max-size`.
+
+**Settings store (`config/settings.py`, `config/settings.example.json`):**
+- `scrcpy_window_scale: float = SCRCPY_VIEW_WINDOW_SCALE`
+
+**Files:** `ui/main_tab.py` (button + subprocess handle), `config/constants.py`,
+`config/settings.py`, `config/settings.example.json`, `ui/settings_tab.py`
+
+---
+
+### 9-B  Device card layout — rows, columns, and auto-fit window width
+
+**Problem:** The app window launches at a fixed default size regardless of how many
+devices are configured or how many columns are in use. Adjusting it manually every
+session is tedious. There is no way to control the card grid shape from settings.
+
+**Design:**
+
+- `ui_card_columns: int` — how many cards sit side by side. Window width auto-fits to
+  this value on launch and whenever the setting changes: each card has a fixed width and
+  the window grows or shrinks to hold exactly `columns` of them side by side.
+- `ui_card_rows: int` — how many rows of cards the visible card area shows before a
+  scrollbar appears. If total cards ≤ `rows × columns`, the area is exactly tall enough
+  to show all of them with no scrollbar. If total cards exceed `rows × columns`, the
+  card area stays at `rows` height and a vertical scrollbar allows access to the rest.
+  No cards are ever hidden.
+- Both settings are spinboxes in the Settings tab under a new "Layout" section.
+- Enforced bounds: columns min 1 max 4, rows min 1 max 5.
+- Defaults: columns = 2, rows = 5.
+- Window width and card area height are recalculated and applied whenever either setting
+  is saved, and on startup.
+
+**Constants (`config/constants.py`):**
+- `UI_DEFAULT_CARD_COLUMNS: int = 2`  `[TUNABLE]`
+- `UI_DEFAULT_CARD_ROWS: int = 5`     `[TUNABLE]`
+- `UI_MIN_CARD_COLUMNS: int = 1`      `[INTERNAL]`
+- `UI_MAX_CARD_COLUMNS: int = 4`      `[INTERNAL]`
+- `UI_MIN_CARD_ROWS: int = 1`         `[INTERNAL]`
+- `UI_MAX_CARD_ROWS: int = 5`         `[INTERNAL]`
+
+**Settings store (`config/settings.py`, `config/settings.example.json`):**
+- `ui_card_columns: int = UI_DEFAULT_CARD_COLUMNS`
+- `ui_card_rows: int = UI_DEFAULT_CARD_ROWS`
+
+**Files:** `ui/main_tab.py` (grid layout + scrollbar logic + width/height fit),
+`config/constants.py`, `config/settings.py`, `config/settings.example.json`,
+`ui/settings_tab.py`
+
+---
+
 ## Future / maybe
 
 - Automated tests (natural candidates: _resolve_tap_coords priority chain, rejoin state dispatch)
-- scrcpy live view window per device
 - Pixel 6 Pro scrcpy settle time investigation (intermittent startup failure)
 - Linux USB reset via `uhubctl` (`uhubctl -l <hub_location> -p <port> -a cycle`) for the MINISFORUM
   deployment — the Sabrent HB-BU10 hub (Realtek 0bda chipset) is confirmed uhubctl-compatible. Would
