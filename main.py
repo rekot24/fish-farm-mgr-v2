@@ -96,7 +96,7 @@ def _ensure_admin() -> str:
     sys.exit(0)  # elevated copy is starting; this unelevated process is done
 
 
-# USB port reset (Level 3 recovery) requires admin elevation on Windows.
+# USB port reset (Level 4 recovery) requires admin elevation on Windows.
 # Self-elevate now so UAC fires once at startup rather than mid-recovery.
 # On Linux this is skipped - uhubctl does not require elevation.
 # Deliberately placed before the remaining project imports so an unelevated
@@ -114,9 +114,9 @@ def _log_elevation_status(status: str) -> None:
     """
     Log the outcome of _ensure_admin() once the logger is configured.
     INFO when elevated (or not applicable); WARNING whenever the app is running
-    unelevated on Windows, since Level 3 USB port reset will then be unavailable.
+    unelevated on Windows, since Level 4 USB port reset will then be unavailable.
     """
-    unelevated_note = "Level 3 USB port reset will be unavailable"
+    unelevated_note = "Level 4 USB port reset will be unavailable"
     if status == ELEVATION_STATUS_ADMIN:
         app_logger.log("Running with administrator privileges", "INFO")
     elif status == ELEVATION_STATUS_NOT_WINDOWS:

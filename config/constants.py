@@ -153,7 +153,7 @@ SCRCPY_SOCKET_RETRY_SLEEP_S = 0.5
 # ---------------------------------------------------------------------------
 # Windows admin elevation (main.py)
 # ---------------------------------------------------------------------------
-# USB port reset (Level 3 recovery, Disable/Enable-PnpDevice) needs an elevated
+# USB port reset (Level 4 recovery, Disable/Enable-PnpDevice) needs an elevated
 # process on Windows. main.py self-elevates once at startup via UAC.
 
 # [INTERNAL] Value returned by platform.system() on Windows. Elevation is
