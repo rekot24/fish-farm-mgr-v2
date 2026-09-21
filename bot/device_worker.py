@@ -41,15 +41,18 @@ Tap failure recovery (_handle_tap_failure):
     while failures persist. If hard <= soft, Level 3 wins and Level 1 never fires.
 
   Stop (hard threshold + rebuild failed):
-    If the backend rebuild also fails, stop the worker. Same behavior as
-    today's device-not-found path. Card shows as Stopped.
+    If the backend rebuild also fails, try USB reset recovery (Level 4, below)
+    before giving up. Only if that is unavailable or fails is the worker stopped
+    (card shows as Stopped).
 
   force_stop_roblox / launch_roblox are never called as part of tap failure
   recovery — those remain reserved for CRASHED / UNKNOWN state handlers only.
 
-USB reset recovery (Level 4, Windows — _handle_adb_failure):
-  When consecutive ADB failures reach settings.adb_failure_threshold the device is
-  confirmed unresponsive. Before stopping, the worker calls recover_via_usb_reset()
+USB reset recovery (Level 4, Windows — _try_usb_reset_recovery):
+  Reached from two places, both just before the worker would stop itself: consecutive
+  ADB failures reaching settings.adb_failure_threshold (_handle_adb_failure), and a
+  failed Level 3 scrcpy rebuild after repeated tap failures (_handle_tap_failure). The
+  device is confirmed unresponsive, so the worker calls recover_via_usb_reset()
   (a DeviceManager callback): USB power cycle, wait for ADB, rebuild the scrcpy
   backend. If that succeeds the failure counter resets and the worker carries on;
   if it is skipped (no pnp_instance_id, not elevated, rate-limited) or fails, the
@@ -337,6 +340,35 @@ class DeviceWorker:
     # Consecutive failure handling
     # ------------------------------------------------------------------
 
+    def _try_usb_reset_recovery(self, settings: Settings) -> bool:
+        """
+        Last automated recovery step before the worker gives up: ask the manager (via
+        the recover_via_usb_reset_fn callback) to USB power-cycle this phone, wait for
+        ADB, and rebuild the scrcpy backend. Shared by the ADB-failure and tap-failure
+        paths so both behave identically.
+
+        Returns:
+            True  — the device is back and capture was rebuilt; BOTH failure counters
+                    are reset and the worker should carry on.
+            False — recovery was skipped (no pnp_instance_id, not elevated, rate
+                    limited, ...) or failed; the caller stops the worker.
+
+        Two-mode error handling: an exception from the callback is logged and treated
+        as "failed" in production, and re-raised in development mode.
+        """
+        try:
+            recovered = bool(self._recover_via_usb_reset())
+        except Exception as e:
+            self._log(f"USB reset recovery raised {type(e).__name__}: {e}", "ERROR")
+            if settings.development_mode:
+                raise
+            return False
+        if recovered:
+            self._consecutive_adb_failures = 0
+            self._consecutive_tap_failures = 0
+            self._log("USB reset recovery succeeded — resuming", "INFO")
+        return recovered
+
     def _handle_adb_failure(self, settings: Settings) -> bool:
         """
         Increment the device-gone counter (ADB reports the device not found or
@@ -361,17 +393,7 @@ class DeviceWorker:
                 f"trying USB reset recovery before stopping",
                 "ERROR",
             )
-            recovered = False
-            try:
-                recovered = self._recover_via_usb_reset()
-            except Exception as e:
-                self._log(
-                    f"USB reset recovery raised {type(e).__name__}: {e}", "ERROR")
-                if settings.development_mode:
-                    raise
-            if recovered:
-                self._consecutive_adb_failures = 0
-                self._log("USB reset recovery succeeded — resuming", "INFO")
+            if self._try_usb_reset_recovery(settings):
                 return False
             self._log(
                 "USB reset recovery unavailable or failed — stopping worker. "
@@ -392,7 +414,8 @@ class DeviceWorker:
           counter, so failures keep escalating toward Level 3.
         Level 3 (tap_failure_hard_threshold): rebuild scrcpy backend — tears
           down and reconnects the video stream for this device only.
-        Stop: if backend rebuild also fails, stop the worker.
+        Level 4 (rebuild failed): USB reset recovery via _try_usb_reset_recovery.
+        Stop: only if that is skipped or fails too.
 
         force_stop_roblox / launch_roblox are never called here — those
         remain reserved for CRASHED / UNKNOWN state recovery only.
@@ -418,8 +441,15 @@ class DeviceWorker:
             ok = self._reconnect_capture()
             if not ok:
                 self._log(
-                    "Backend rebuild failed — stopping worker. "
-                    "Restart manually once device is responding.",
+                    "Backend rebuild failed — trying USB reset recovery before stopping",
+                    "ERROR",
+                )
+                if self._try_usb_reset_recovery(settings):
+                    return
+                self._log(
+                    "Backend rebuild failed and USB reset recovery unavailable or "
+                    "failed — stopping worker. Restart manually once device is "
+                    "responding.",
                     "ERROR",
                 )
                 threading.Thread(target=self.stop, daemon=True).start()

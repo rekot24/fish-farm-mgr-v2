@@ -23,7 +23,8 @@ ADB behavior:
     discover_devices always query live — they need a current answer.
 
 USB reset recovery (Level 4, Windows):
-  - When a worker reaches adb_failure_threshold it calls recover_via_usb_reset()
+  - When a worker reaches adb_failure_threshold — or its Level 3 scrcpy rebuild
+    fails after repeated tap failures — it calls recover_via_usb_reset()
     (callback) instead of stopping straight away: USB power cycle via PowerShell
     Disable-/Enable-PnpDevice, poll `adb devices` until the phone returns, then rebuild
     the scrcpy backend. Skipped when the device's pnp_instance_id is blank, when the
@@ -429,13 +430,15 @@ class DeviceManager:
         Last automated recovery step for an unresponsive device: USB power cycle,
         wait for ADB to see the phone again, then rebuild the scrcpy backend.
 
-        Called by the device's worker (via callback) when it reaches
-        adb_failure_threshold, just before it would stop itself. Blocks the calling
+        Called by the device's worker (via callback) just before it would stop
+        itself: when it reaches adb_failure_threshold, or when its Level 3 scrcpy
+        rebuild fails after repeated tap failures. Blocks the calling
         worker thread — acceptable, that device has nothing else to do.
 
-        Skips (returns False) when the per-device pnp_instance_id is blank, the app is
-        not elevated, the platform is not Windows, or this device was already reset
-        within USB_RESET_MIN_INTERVAL_S (stops a flapping phone being power-cycled
+        Skips (returns False) when the device's worker is not running (it was stopped
+        meanwhile — never power-cycle a phone the user just stopped), the per-device
+        pnp_instance_id is blank, the app is not elevated, the platform is not
+        Windows, or this device was already reset within USB_RESET_MIN_INTERVAL_S (stops a flapping phone being power-cycled
         in a loop).
 
         Returns:
@@ -444,6 +447,13 @@ class DeviceManager:
             False — recovery skipped or failed; the worker stops itself as before.
         """
         tag = serial[:8]
+        worker = self._workers.get(serial)
+        if worker is None or not worker.is_running:
+            app_logger.log(
+                f"[manager] USB reset for {tag} skipped — its worker is not running",
+                "WARNING")
+            return False
+
         last = self._last_usb_reset_at.get(serial)
         if last is not None and time.monotonic() - last < USB_RESET_MIN_INTERVAL_S:
             app_logger.log(
