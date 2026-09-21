@@ -113,6 +113,19 @@ ADB_FOREGROUND_CHECK_SHELL_CMD = (
     "dumpsys window displays | grep -E 'mCurrentFocus|mFocusedApp'"
 )
 
+# [INTERNAL] Regex for adb CLIENT errors that mean "this device is gone": the phone
+# dropped off ADB ("not found") or its transport is unusable ("offline"). Matched against
+# stderr of a failed (non-zero exit) `adb -s <serial> ...` call. Real wording, verified on
+# the bundled adb with a serial that had dropped off ADB:
+#     adb.exe: device 'R5CW91E12GX' not found      (shell / most commands)
+#     error: device 'R5CW91E12GX' not found        (get-state)
+#     error: device offline                        (ADB Offline state)
+# and the pre-serial wording `device not found` is still accepted. Deliberately NOT
+# matched: `device unauthorized` / `device still connecting` (need a person, a USB reset
+# cannot fix them), `more than one device` and timeouts (a slow phone is not a dead one).
+# The `adb:` / `error:` prefix keeps a shell command's own stderr from matching.
+ADB_DEVICE_GONE_PATTERN = r"(?:adb(?:\.exe)?|error): device (?:'[^']*' )?(?:not found|offline)"
+
 # [INTERNAL] Max 32-bit integer — used as "never timeout" for ADB screen_off_timeout.
 MAX_INT32 = 2_147_483_647
 

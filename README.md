@@ -154,7 +154,7 @@ Go to the **Settings** tab. Key settings:
 | Lobby stuck threshold | 60s | Time in lobby before firing an end-run tap |
 | Unknown stuck threshold | 60s | Time in UNKNOWN state before force-relaunching Roblox |
 | Loop interval | 5s | How often each device checks state |
-| ADB failure threshold | 3 | Consecutive device-not-found failures before worker stops |
+| ADB failure threshold | 3 | Consecutive device-gone (ADB "not found" / "offline") failures before USB reset recovery is tried and the worker stops |
 | Hide console window on launch (Windows) | On | Hides the console window of the elevated relaunch; takes effect on next restart |
 
 Per-device intervals (auto-farm, end-run, stay-awake) are configured in each device's **Settings** button on the Main tab.

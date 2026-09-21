@@ -4,7 +4,8 @@ bot/device_worker.py
 The main loop for a single device. One DeviceWorker per connected phone.
 
 Consecutive ADB failure detection:
-  The worker tracks how many times in a row ADB returns "device not found"
+  The worker tracks how many times in a row ADB reports the device gone
+  ("device 'X' not found" or "device offline" — see tools/adb_errors.py)
   (checked via _check_roblox_foreground / _check_roblox_running each cycle).
   Any successful ADB contact resets the counter to zero. If the counter
   reaches settings.adb_failure_threshold consecutive failures, the worker
@@ -110,6 +111,7 @@ from config.devices import DeviceConfig
 from config.settings import Settings
 from detection.detector import run_detector_by_name
 from detection.template_bank import TemplateBank
+from tools.adb_errors import adb_output_means_device_gone
 
 _DEVICE_NOT_FOUND = "device_not_found"
 
@@ -334,8 +336,8 @@ class DeviceWorker:
 
     def _handle_adb_failure(self, settings: Settings) -> bool:
         """
-        Increment the device-not-found counter. At the threshold, try USB reset
-        recovery before giving up.
+        Increment the device-gone counter (ADB reports the device not found or
+        offline). At the threshold, try USB reset recovery before giving up.
 
         Returns:
             True  — the worker should stop (threshold reached and recovery skipped
@@ -346,13 +348,13 @@ class DeviceWorker:
         self._consecutive_adb_failures += 1
         threshold = settings.adb_failure_threshold
         self._log(
-            f"Device not found — consecutive failures: "
+            f"Device gone (not found / offline) — consecutive failures: "
             f"{self._consecutive_adb_failures}/{threshold}",
             "WARNING",
         )
         if self._consecutive_adb_failures >= threshold:
             self._log(
-                f"Device not found {threshold} times in a row — "
+                f"Device gone (not found / offline) {threshold} times in a row — "
                 f"trying USB reset recovery before stopping",
                 "ERROR",
             )
@@ -922,9 +924,7 @@ class DeviceWorker:
                  ADB_FOREGROUND_CHECK_SHELL_CMD],
                 capture_output=True, timeout=ADB_FOREGROUND_CHECK_TIMEOUT_S,
             )
-            stderr = result.stderr.decode("utf-8", errors="replace")
-            if "device not found" in stderr or "device not found" in \
-               result.stdout.decode("utf-8", errors="replace"):
+            if adb_output_means_device_gone(result.returncode, result.stderr):
                 return _DEVICE_NOT_FOUND
             output = result.stdout.decode("utf-8", errors="replace")
             # grep already filtered to mCurrentFocus / mFocusedApp lines on-device.
@@ -944,6 +944,16 @@ class DeviceWorker:
             return False
 
     def _check_roblox_running(self):
+        """
+        Check whether a Roblox process exists on the device (used to tell CRASHED from
+        "backgrounded").
+
+        Returns:
+            True / False       — a com.roblox.client process is / is not running. False
+                               also covers any error or timeout (logged at WARNING).
+            _DEVICE_NOT_FOUND  — ADB reports the device gone (not found / offline); the
+                               caller feeds this to the consecutive-failure counter.
+        """
         try:
             from config.paths import adb_exe
             result = subprocess.run(
@@ -951,10 +961,9 @@ class DeviceWorker:
                  "ps", "-A", "-o", "NAME"],
                 capture_output=True, timeout=5.0,
             )
-            stderr = result.stderr.decode("utf-8", errors="replace")
-            stdout = result.stdout.decode("utf-8", errors="replace")
-            if "device not found" in stderr or "device not found" in stdout:
+            if adb_output_means_device_gone(result.returncode, result.stderr):
                 return _DEVICE_NOT_FOUND
+            stdout = result.stdout.decode("utf-8", errors="replace")
             return "com.roblox.client" in stdout
         except Exception as e:
             self._log(f"Process check failed: {e}", "WARNING")
