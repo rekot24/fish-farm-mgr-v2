@@ -13,7 +13,7 @@ The worker normalizes via states.to_detector_name() when doing lookups.
 Rule: every state constant's value must exactly match the detector name
 used in the capture tab (which is also the key in detector_assignments
 and the asset folder name). to_detector_name() lowercases the value —
-so "SERVERS_BUTTON" → "servers_button", which must match the capture tab.
+so "GAME_PAGE" → "game_page", which must match the capture tab.
 
 Tap-target-only detectors (24rolla_avatar, hamburger_menu,
 continue_playing_button, befish_game_icon, end_run_button, auto_farm_on) are referenced as plain strings in
@@ -26,8 +26,7 @@ Rejoin fallback chain (hamburger route):
   ROBLOX_HOME → tap hamburger_menu (tap target)
   → CONTINUE_PLAYING_BUTTON detected → tap continue_playing_button (tap target)
   → BEFISH_GAME_ICON detected → tap befish_game_icon (tap target)
-  → GAME_PAGE detected → swipe up (no tap)
-  → SERVERS_BUTTON detected → tap servers_button (tap target)
+  → GAME_PAGE detected → tap game_page (active players icon — goes directly to server list)
   → PRIVATE_SERVER_ENTRY detected → tap private_server_entry (its own element)
   → IN_TANK
 """
@@ -49,7 +48,6 @@ JOIN_BUTTON              = "JOIN_BUTTON"
 CONTINUE_PLAYING_BUTTON  = "CONTINUE_PLAYING_BUTTON"
 BEFISH_GAME_ICON         = "BEFISH_GAME_ICON"
 GAME_PAGE                = "GAME_PAGE"
-SERVERS_BUTTON           = "SERVERS_BUTTON"
 PRIVATE_SERVER_ENTRY     = "PRIVATE_SERVER_ENTRY"
 
 
@@ -58,8 +56,8 @@ def to_detector_name(state: str) -> str:
     Convert a state constant to its corresponding detector name
     (the lowercase key used in detector_assignments and asset folders).
 
-    e.g. "AUTO_FARM_OFF"     → "auto_farm_off"
-         "BEFISH_GAME_ICON"  → "befish_game_icon"
+    e.g. "AUTO_FARM_OFF"        → "auto_farm_off"
+         "BEFISH_GAME_ICON"     → "befish_game_icon"
          "PRIVATE_SERVER_ENTRY" → "private_server_entry"
     """
     return state.lower()

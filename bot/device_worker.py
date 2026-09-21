@@ -80,9 +80,8 @@ Fallback rejoin (hamburger menu route):
   ROBLOX_HOME → tap hamburger_menu (tap target)
   → CONTINUE_PLAYING_BUTTON → tap continue_playing_button (tap target)
   → BEFISH_GAME_ICON → tap befish_game_icon (tap target)
-  → GAME_PAGE → swipe up (no tap)
-  → SERVERS_BUTTON → tap servers_button (tap target)
-  → SERVER_LIST → tap private_server_entry (tap target)
+  → GAME_PAGE → tap game_page (active players icon — goes directly to server list)
+  → PRIVATE_SERVER_ENTRY → tap private_server_entry (its own element)
   → IN_TANK
 
 CRASHED state: determined by ADB process check, not image detection.
@@ -101,7 +100,6 @@ from bot import app_logger, states
 from bot.actions import (
     adb_reconnect,
     double_tap,
-    expand_and_scroll_game_page,
     force_stop_roblox,
     launch_roblox,
     stay_awake_tap,
@@ -128,7 +126,6 @@ _DETECTOR_PRIORITY = [
     states.CONTINUE_PLAYING_BUTTON,
     states.BEFISH_GAME_ICON,
     states.GAME_PAGE,
-    states.SERVERS_BUTTON,
     states.PRIVATE_SERVER_ENTRY,
     states.LOBBY,
     states.AUTO_FARM_OFF,
@@ -580,8 +577,6 @@ class DeviceWorker:
             self._handle_befish_game_icon(cfg, settings)
         elif state == states.GAME_PAGE:
             self._handle_game_page(detect_result, cfg, settings)
-        elif state == states.SERVERS_BUTTON:
-            self._handle_servers_button(cfg, settings)
         elif state == states.PRIVATE_SERVER_ENTRY:
             self._handle_private_server_entry(cfg, settings)
         elif state == states.LOBBY:
@@ -744,32 +739,26 @@ class DeviceWorker:
         else:
             self._log("befish_game_icon coords not resolved", "WARNING")
 
-    def _handle_game_page(self, detect_result, cfg: DeviceConfig, settings: Settings) -> None:
+    def _handle_game_page(self, detect_result, cfg: DeviceConfig,
+                           settings: Settings) -> None:
+        """
+        Tap the active players icon on the game page bottom-sheet.
+        This icon (showing X active players) goes directly to the server list,
+        bypassing the need to expand the sheet and scroll to the Servers button.
+        The detector image should be cropped to this icon.
+        """
         self._unknown_entered_at = None
-        if detect_result and detect_result.center:
-            focus_x, focus_y = detect_result.center
-            self._log(
-                f"Game page detected — expanding card and scrolling to Servers "
-                f"(focus={focus_x},{focus_y})", "INFO")
-            expand_and_scroll_game_page(self._serial, focus_x, focus_y)
-        else:
-            self._log("Game page: no center from detection — skipping scroll", "WARNING")
-            return
-        self._set_last_action("Expanded and scrolled game page to Servers")
-
-    def _handle_servers_button(self, cfg: DeviceConfig, settings: Settings) -> None:
-        self._unknown_entered_at = None
-        coords = self._resolve_tap_coords(cfg, ["servers_button"])
+        coords = self._resolve_tap_coords(cfg, [states.GAME_PAGE])
         if coords:
-            self._log("Servers button visible — tapping it", "INFO")
+            self._log("Game page detected — tapping active players icon", "INFO")
             ok = tap(self._serial, coords[0], coords[1])
             if ok:
                 self._record_tap_success()
             else:
                 self._handle_tap_failure(settings)
-            self._set_last_action("Tapped Servers button")
+            self._set_last_action("Tapped active players icon (game page)")
         else:
-            self._log("servers_button coords not resolved", "WARNING")
+            self._log("game_page coords not resolved", "WARNING")
 
     def _handle_private_server_entry(self, cfg: DeviceConfig, settings: Settings) -> None:
         self._unknown_entered_at = None
