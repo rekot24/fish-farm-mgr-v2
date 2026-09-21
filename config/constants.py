@@ -188,3 +188,80 @@ ELEVATION_STATUS_NOT_WINDOWS = "not_windows"    # elevation not applicable
 ELEVATION_STATUS_OPTED_OUT = "opted_out"        # NO_ELEVATE_FLAG was passed
 ELEVATION_STATUS_UNKNOWN = "unknown"            # could not determine admin state
 ELEVATION_STATUS_LAUNCH_FAILED = "launch_failed"  # UAC declined or ShellExecuteW error
+
+# ---------------------------------------------------------------------------
+# USB port reset - Level 4 recovery (Windows; bot/device_manager.py, tools/usb_pnp.py)
+# ---------------------------------------------------------------------------
+# When a device is confirmed unresponsive (its worker hits adb_failure_threshold) the
+# manager power-cycles the phone's USB device with PowerShell Disable-/Enable-PnpDevice,
+# polls `adb devices` for it to return, then rebuilds the scrcpy backend. Needs an
+# elevated process and a per-device pnp_instance_id in devices.json (blank = skip).
+
+# [TUNABLE] Seconds to wait between Disable-PnpDevice and Enable-PnpDevice (and before
+# an Enable retry). Lets Windows fully tear the device down before it re-enumerates.
+USB_RESET_REENUM_WAIT_S: float = 3.0
+
+# [TUNABLE] Subprocess timeout for each PowerShell PnP cmdlet call (seconds). PowerShell
+# startup adds ~1-2s overhead even for fast commands - 10s is safe.
+USB_RESET_TIMEOUT_S: float = 10.0
+
+# [TUNABLE] After Enable-PnpDevice, how long to poll `adb devices` for the phone to come
+# back (seconds). Phones vary: re-enumeration plus ADB re-authorization takes ~5-15s.
+USB_RESET_ADB_REAPPEAR_TIMEOUT_S: float = 20.0
+
+# [TUNABLE] Minimum time between USB resets of the same device (seconds). Stops a flapping
+# phone being power-cycled in a loop overnight; a second failure inside this window falls
+# through to the normal "stop the worker" behaviour.
+USB_RESET_MIN_INTERVAL_S: float = 600.0
+
+# [INTERNAL] Poll interval while waiting for ADB to see the device again (seconds).
+USB_RESET_ADB_POLL_INTERVAL_S = 1.0
+
+# [INTERNAL] Extra Enable-PnpDevice attempts if the first one fails. A phone left disabled
+# is worse than one left offline, so Enable is retried before giving up.
+USB_RESET_ENABLE_RETRIES = 1
+
+# [INTERNAL] Timeout for the read-only Get-PnpDevice lookup behind the Detect button
+# (seconds). It enumerates every PnP device, so it is slower than Disable/Enable.
+PNP_LOOKUP_TIMEOUT_S = 20.0
+
+# [INTERNAL] Allowed shape of a PnP InstanceId, e.g. USB\VID_18D1&PID_4EE7\19161FDEE005RY:
+# letters, digits and _ & . \ { } - only. The InstanceId is free-text config used by an
+# elevated process, so anything else is rejected before it reaches PowerShell.
+PNP_INSTANCE_ID_PATTERN = r"^[A-Za-z0-9_&.\\{}\-]{1,200}$"
+
+# [INTERNAL] Windows PowerShell 5.1 (ships the PnpDevice module). Launched with
+# -NoProfile -NonInteractive and no console window.
+POWERSHELL_EXE = "powershell"
+
+# [INTERNAL] Environment variables that carry values into the PowerShell scripts, so
+# nothing user-supplied is ever interpolated into script source (injection-proof).
+PNP_ID_ENV_VAR = "FISHFARM_PNP_INSTANCE_ID"
+PNP_SERIAL_ENV_VAR = "FISHFARM_ADB_SERIAL"
+
+# [INTERNAL] Scripts run via `powershell -Command`. -ErrorAction Stop / try-catch make every
+# failure a non-zero exit code: Disable/Enable-PnpDevice raise NON-terminating errors by
+# default, so without this a failed reset would look like success.
+_PS_FAIL_HANDLER = "catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"
+PS_DISABLE_PNP_SCRIPT = (
+    "$ErrorActionPreference = 'Stop'; "
+    "try { Disable-PnpDevice -InstanceId $env:" + PNP_ID_ENV_VAR + " -Confirm:$false } "
+    + _PS_FAIL_HANDLER
+)
+PS_ENABLE_PNP_SCRIPT = (
+    "$ErrorActionPreference = 'Stop'; "
+    "try { Enable-PnpDevice -InstanceId $env:" + PNP_ID_ENV_VAR + " -Confirm:$false } "
+    + _PS_FAIL_HANDLER
+)
+# Find the phone's top-level USB device: present, USB\VID_*, and its InstanceId ENDS WITH the
+# ADB serial (verified on Pixel and Samsung phones, Android 12-17). Child interface nodes
+# (...&ADB\..., ...&MI_00\...) do not end with the serial, so they are never matched.
+PS_FIND_PNP_SCRIPT = (
+    "$ErrorActionPreference = 'Stop'; "
+    "try { $serial = $env:" + PNP_SERIAL_ENV_VAR + "; "
+    "Get-PnpDevice -PresentOnly | Where-Object { "
+    "$_.InstanceId -like 'USB\\VID_*' -and "
+    "$_.InstanceId.EndsWith('\\' + $serial, [System.StringComparison]::OrdinalIgnoreCase) } | "
+    "ForEach-Object { $_.InstanceId } } "
+    + _PS_FAIL_HANDLER
+)

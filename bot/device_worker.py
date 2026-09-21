@@ -43,6 +43,14 @@ Tap failure recovery (_handle_tap_failure):
   force_stop_roblox / launch_roblox are never called as part of tap failure
   recovery — those remain reserved for CRASHED / UNKNOWN state handlers only.
 
+USB reset recovery (Level 4, Windows — _handle_adb_failure):
+  When consecutive ADB failures reach settings.adb_failure_threshold the device is
+  confirmed unresponsive. Before stopping, the worker calls recover_via_usb_reset()
+  (a DeviceManager callback): USB power cycle, wait for ADB, rebuild the scrcpy
+  backend. If that succeeds the failure counter resets and the worker carries on;
+  if it is skipped (no pnp_instance_id, not elevated, rate-limited) or fails, the
+  worker stops itself exactly as before.
+
 Tap coordinate resolution (_resolve_tap_coords):
   1. tap_offset_x/y set on the DetectorAssignment (manual override via
      crop tool amber dot) → use it always, runs detection for bbox origin.
@@ -134,6 +142,7 @@ class DeviceWorker:
         get_device_cfg: Callable[[], DeviceConfig],
         reconnect_capture: Callable[[], bool],
         persist_tap_cache_fn: Callable[[str, str, int, int], None],
+        recover_via_usb_reset_fn: Callable[[], bool],
     ):
         self._serial = device_cfg.serial
         self._capture = capture_backend
@@ -142,6 +151,7 @@ class DeviceWorker:
         self._get_device_cfg = get_device_cfg
         self._reconnect_capture = reconnect_capture
         self._persist_tap_cache = persist_tap_cache_fn
+        self._recover_via_usb_reset = recover_via_usb_reset_fn
 
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -324,8 +334,14 @@ class DeviceWorker:
 
     def _handle_adb_failure(self, settings: Settings) -> bool:
         """
-        Increment the device-not-found counter. Returns True if the worker
-        should stop (threshold reached).
+        Increment the device-not-found counter. At the threshold, try USB reset
+        recovery before giving up.
+
+        Returns:
+            True  — the worker should stop (threshold reached and recovery skipped
+                    or failed).
+            False — keep running: below the threshold, or recovery brought the
+                    device back (the counter is reset).
         """
         self._consecutive_adb_failures += 1
         threshold = settings.adb_failure_threshold
@@ -337,7 +353,24 @@ class DeviceWorker:
         if self._consecutive_adb_failures >= threshold:
             self._log(
                 f"Device not found {threshold} times in a row — "
-                f"stopping worker. Restart manually when device is back.",
+                f"trying USB reset recovery before stopping",
+                "ERROR",
+            )
+            recovered = False
+            try:
+                recovered = self._recover_via_usb_reset()
+            except Exception as e:
+                self._log(
+                    f"USB reset recovery raised {type(e).__name__}: {e}", "ERROR")
+                if settings.development_mode:
+                    raise
+            if recovered:
+                self._consecutive_adb_failures = 0
+                self._log("USB reset recovery succeeded — resuming", "INFO")
+                return False
+            self._log(
+                "USB reset recovery unavailable or failed — stopping worker. "
+                "Restart manually when device is back.",
                 "ERROR",
             )
             threading.Thread(target=self.stop, daemon=True).start()

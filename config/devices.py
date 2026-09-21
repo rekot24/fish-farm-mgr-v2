@@ -75,6 +75,12 @@ class DeviceConfig:
     stay_awake_enabled: bool = False
     stuck_lobby_detection_enabled: bool = True
 
+    # Windows PnP InstanceId of this phone's USB device (e.g.
+    # USB\VID_18D1&PID_4EE7\<adb serial>), used for the last-resort USB port reset.
+    # Blank = not configured: USB reset is skipped for this device. Filled in via the
+    # Device Settings dialog (Detect button). See tools/usb_pnp.py.
+    pnp_instance_id: str = ""
+
     auto_farm_interval_s: float = AUTO_FARM_INTERVAL_S
     end_run_interval_s: float = END_RUN_INTERVAL_S
     stay_awake_interval_s: float = STAY_AWAKE_INTERVAL_S
