@@ -27,15 +27,18 @@ Tap failure recovery (_handle_tap_failure):
 
   Level 1 (tap_failure_threshold, default 5):
     Call adb_reconnect() — restarts the ADB transport layer without touching
-    USB or any running apps. Non-disruptive to the game session. Counter
-    resets after the attempt regardless of outcome; the next tap result
-    determines whether escalation continues.
+    USB or any running apps. Non-disruptive to the game session. The counter
+    is NOT reset by this attempt: it keeps counting so a persistent failure
+    escalates to Level 3. (Resetting it here made Level 3 unreachable with the
+    default thresholds, 5 < 10 — a phone with dead taps looped adb_reconnect
+    forever.)
 
   Level 3 (tap_failure_hard_threshold, default 10):
     Call reconnect_capture() — tears down and rebuilds the scrcpy backend
     for this device only. Slightly more disruptive (video stream drops and
     reconnects) but still leaves the game running. Counter resets after
-    the attempt.
+    the attempt, so the whole ladder (Level 1 at 5, Level 3 at 10) repeats
+    while failures persist. If hard <= soft, Level 3 wins and Level 1 never fires.
 
   Stop (hard threshold + rebuild failed):
     If the backend rebuild also fails, stop the worker. Same behavior as
@@ -385,7 +388,8 @@ class DeviceWorker:
         at the configured thresholds.
 
         Level 1 (tap_failure_threshold): adb reconnect — restarts ADB
-          transport only. Non-disruptive to the game.
+          transport only. Non-disruptive to the game. Does NOT reset the
+          counter, so failures keep escalating toward Level 3.
         Level 3 (tap_failure_hard_threshold): rebuild scrcpy backend — tears
           down and reconnects the video stream for this device only.
         Stop: if backend rebuild also fails, stop the worker.
@@ -403,20 +407,9 @@ class DeviceWorker:
             "WARNING",
         )
 
-        if self._consecutive_tap_failures == soft:
-            self._log(
-                f"Tap failures reached {soft} — attempting ADB reconnect",
-                "WARNING",
-            )
-            ok = adb_reconnect(self._serial)
-            self._log(
-                f"ADB reconnect {'succeeded' if ok else 'failed'} for {self._serial[:8]}",
-                "INFO" if ok else "WARNING",
-            )
-            # Counter resets after attempt; next tap result drives further escalation
-            self._consecutive_tap_failures = 0
-
-        elif self._consecutive_tap_failures >= hard:
+        # Level 3 is checked first so that hard <= soft (a misconfiguration) cannot
+        # fire both actions on the same failure.
+        if self._consecutive_tap_failures >= hard:
             self._log(
                 f"Tap failures reached {hard} — rebuilding scrcpy backend",
                 "ERROR",
@@ -430,6 +423,21 @@ class DeviceWorker:
                     "ERROR",
                 )
                 threading.Thread(target=self.stop, daemon=True).start()
+
+        elif self._consecutive_tap_failures == soft:
+            self._log(
+                f"Tap failures reached {soft} — attempting ADB reconnect",
+                "WARNING",
+            )
+            ok = adb_reconnect(self._serial)
+            self._log(
+                f"ADB reconnect {'succeeded' if ok else 'failed'} for {self._serial[:8]}",
+                "INFO" if ok else "WARNING",
+            )
+            # Deliberately NOT reset: the counter must keep growing so that a
+            # failure that survives the reconnect reaches the hard threshold.
+            # Only a successful tap (_record_tap_success) or the Level 3 rebuild
+            # resets it.
 
     def _record_tap_success(self) -> None:
         """Reset the tap failure counter on any successful tap."""
