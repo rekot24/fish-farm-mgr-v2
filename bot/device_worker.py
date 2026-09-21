@@ -93,7 +93,11 @@ from bot.actions import (
     tap,
 )
 from capture.base import CaptureBackend
-from config.constants import DETECTION_THRESHOLD
+from config.constants import (
+    ADB_FOREGROUND_CHECK_SHELL_CMD,
+    ADB_FOREGROUND_CHECK_TIMEOUT_S,
+    DETECTION_THRESHOLD,
+)
 from config.devices import DeviceConfig
 from config.settings import Settings
 from detection.detector import run_detector_by_name
@@ -864,26 +868,42 @@ class DeviceWorker:
     # ------------------------------------------------------------------
 
     def _check_roblox_foreground(self):
+        """
+        Check whether Roblox is the foreground app via the device's window focus.
+
+        Returns:
+            True / False           — Roblox is / is not in the foreground. False
+                                     also covers "could not determine" and any
+                                     error or timeout (logged at WARNING).
+            _DEVICE_NOT_FOUND      — ADB reports the device is gone; the caller
+                                     feeds this to the consecutive-failure counter.
+        """
         try:
             from config.paths import adb_exe
+            # Lightweight foreground check — a couple of grep'd focus lines instead
+            # of the full activity stack. 'dumpsys activity activities' was the
+            # previous command; too much output to pull on every None-frame or
+            # no-detector-match cycle. Same answer from ~200 bytes.
             result = subprocess.run(
                 [adb_exe(), "-s", self._serial, "shell",
-                 "dumpsys", "activity", "activities"],
-                capture_output=True, timeout=8.0,
+                 ADB_FOREGROUND_CHECK_SHELL_CMD],
+                capture_output=True, timeout=ADB_FOREGROUND_CHECK_TIMEOUT_S,
             )
             stderr = result.stderr.decode("utf-8", errors="replace")
             if "device not found" in stderr or "device not found" in \
                result.stdout.decode("utf-8", errors="replace"):
                 return _DEVICE_NOT_FOUND
             output = result.stdout.decode("utf-8", errors="replace")
-            for line in output.splitlines():
-                if "mResumedActivity" in line or "ResumedActivity" in line:
-                    is_fg = "com.roblox.client" in line
-                    self._log(
-                        f"Roblox {'is' if is_fg else 'is NOT'} foreground app",
-                        "DEBUG" if is_fg else "WARNING",
-                    )
-                    return is_fg
+            # grep already filtered to mCurrentFocus / mFocusedApp lines on-device.
+            # Multi-display devices emit several (some `=null`), so match any line.
+            focus_lines = [line for line in output.splitlines() if line.strip()]
+            if focus_lines:
+                is_fg = any("com.roblox.client" in line for line in focus_lines)
+                self._log(
+                    f"Roblox {'is' if is_fg else 'is NOT'} foreground app",
+                    "DEBUG" if is_fg else "WARNING",
+                )
+                return is_fg
             self._log("Could not determine foreground app", "WARNING")
             return False
         except Exception as e:

@@ -96,6 +96,23 @@ ADB_SCREENCAP_TIMEOUT_S = 15.0
 # Only the status-poll path uses this; start/rebuild always query live.
 ADB_STATUS_CACHE_TTL_S: float = 10.0
 
+# [TUNABLE] Timeout for the lightweight foreground-app check (seconds).
+# Lower than the old 8s because the command output is ~200 bytes; measured
+# ~0.1s on Android 12-17 devices. A timeout is treated as "not foreground".
+ADB_FOREGROUND_CHECK_TIMEOUT_S: float = 3.0
+
+# [INTERNAL] Device-side shell command for the foreground-app check. Grep runs
+# on the phone so only the matching focus lines cross USB (~200 B) instead of the
+# full activity stack (26-75 KB from `dumpsys activity activities`).
+# Two things learned by probing real devices (Android 12-17) — do not "simplify":
+#   - Use `dumpsys window displays`, NOT `dumpsys window windows`: the
+#     mCurrentFocus / mFocusedApp lines are absent from the `windows` subset.
+#   - No `grep -m1`: on Android 16/17 the first match is `mCurrentFocus=null` from
+#     another display, ahead of the real Roblox line. Take all lines, match any.
+ADB_FOREGROUND_CHECK_SHELL_CMD = (
+    "dumpsys window displays | grep -E 'mCurrentFocus|mFocusedApp'"
+)
+
 # [INTERNAL] Max 32-bit integer — used as "never timeout" for ADB screen_off_timeout.
 MAX_INT32 = 2_147_483_647
 
