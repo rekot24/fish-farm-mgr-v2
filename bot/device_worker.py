@@ -51,6 +51,8 @@ Tap coordinate resolution (_resolve_tap_coords):
   3. Neither condition met (cache empty, or always_detect is True) → run
      template match live. Persist result only when always_detect is False.
      Detectors with always_detect=True never write to the cache.
+  The disk write goes through the persist_tap_cache_fn callback owned by
+  DeviceManager (thread-safe); the worker never touches devices.json itself.
 
 Rejoin navigation is fully state-driven — no Chrome URL, no hardcoded sleeps.
 Each detected state triggers one action that advances to the next state.
@@ -92,7 +94,7 @@ from bot.actions import (
 )
 from capture.base import CaptureBackend
 from config.constants import DETECTION_THRESHOLD
-from config.devices import DeviceConfig, load_devices, save_devices
+from config.devices import DeviceConfig
 from config.settings import Settings
 from detection.detector import run_detector_by_name
 from detection.template_bank import TemplateBank
@@ -127,6 +129,7 @@ class DeviceWorker:
         get_settings: Callable[[], Settings],
         get_device_cfg: Callable[[], DeviceConfig],
         reconnect_capture: Callable[[], bool],
+        persist_tap_cache_fn: Callable[[str, str, int, int], None],
     ):
         self._serial = device_cfg.serial
         self._capture = capture_backend
@@ -134,6 +137,7 @@ class DeviceWorker:
         self._get_settings = get_settings
         self._get_device_cfg = get_device_cfg
         self._reconnect_capture = reconnect_capture
+        self._persist_tap_cache = persist_tap_cache_fn
 
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -827,21 +831,12 @@ class DeviceWorker:
             if result.found and result.center:
                 x, y = result.center
                 if not assignment.always_detect:
-                    # Cache and persist for detectors with stable positions
+                    # Cache for detectors with stable positions. In-memory update
+                    # is immediate (only this worker owns this device's cfg);
+                    # the manager serializes the disk write across all workers.
                     assignment.cached_tap_x = x
                     assignment.cached_tap_y = y
-                    try:
-                        all_devices = load_devices()
-                        persisted = all_devices.get(self._serial)
-                        if persisted and detector_key in persisted.detector_assignments:
-                            persisted.detector_assignments[detector_key].cached_tap_x = x
-                            persisted.detector_assignments[detector_key].cached_tap_y = y
-                            save_devices(all_devices)
-                            self._log(
-                                f"[tap_cache] STORED {detector_key} → ({x}, {y})", "INFO")
-                    except Exception as e:
-                        self._log(
-                            f"[tap_cache] Failed to persist {detector_key}: {e}", "WARNING")
+                    self._persist_tap_cache(self._serial, detector_key, x, y)
                 else:
                     # always_detect: use live result, never cache
                     self._log(

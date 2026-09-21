@@ -18,6 +18,11 @@ ADB behavior:
   - Status snapshots include adb_connected so the UI can distinguish a normal
     stopped card from a phone whose USB/ADB transport has dropped.
 
+Tap-coordinate cache persistence:
+  - Workers never touch devices.json directly. When a worker discovers a new
+    tap coordinate it calls persist_tap_cache(), which serializes all workers'
+    writes behind one lock so concurrent discoveries cannot overwrite each other.
+
 get_all_status() returns an entry for every registered device, not just devices
 with active workers. Devices without workers show running=False and
 state=UNKNOWN so they appear as stopped cards on the Main tab immediately after
@@ -27,12 +32,13 @@ being registered.
 from __future__ import annotations
 
 import subprocess
+import threading
 from typing import Callable
 
 from bot import app_logger
 from bot.device_worker import DeviceWorker
 from capture.scrcpy_socket import ScrcpySocketBackend
-from config.devices import DeviceConfig
+from config.devices import DeviceConfig, load_devices, save_devices
 from config.paths import project_root, adb_exe
 from config.settings import Settings
 from detection.template_bank import TemplateBank
@@ -50,6 +56,52 @@ class DeviceManager:
         self._bank = TemplateBank(project_root=project_root())
         self._workers: dict[str, DeviceWorker] = {}
         self._backends: dict[str, ScrcpySocketBackend] = {}
+        # One lock guards every worker's read-modify-write of devices.json
+        # (see persist_tap_cache). Without it two workers saving at once
+        # would silently overwrite each other's cached coordinate.
+        self._tap_cache_lock = threading.Lock()
+
+    def persist_tap_cache(self, serial: str, detector_key: str, x: int, y: int) -> None:
+        """
+        Thread-safe write of a single cached tap coordinate to devices.json.
+        Acquires _tap_cache_lock, loads current devices, updates only the one
+        field for this serial + detector, and saves. Logs INFO on success,
+        WARNING on failure. Called by DeviceWorker via callback; workers never
+        call load_devices/save_devices directly.
+        """
+        with self._tap_cache_lock:
+            try:
+                all_devices = load_devices()
+                persisted = all_devices.get(serial)
+                if persisted is None:
+                    # Device removed while its worker was running — nothing to update.
+                    app_logger.log(
+                        f"[tap_cache] Cannot persist {detector_key} for {serial[:8]} — "
+                        f"device not found in devices.json",
+                        "WARNING",
+                    )
+                    return
+                assignment = persisted.detector_assignments.get(detector_key)
+                if assignment is None:
+                    app_logger.log(
+                        f"[tap_cache] Cannot persist {detector_key} for {serial[:8]} — "
+                        f"no such detector assignment in devices.json",
+                        "WARNING",
+                    )
+                    return
+                assignment.cached_tap_x = x
+                assignment.cached_tap_y = y
+                save_devices(all_devices)
+                app_logger.log(
+                    f"[tap_cache] STORED {detector_key} for {serial[:8]} → ({x}, {y})",
+                    "INFO",
+                )
+            except Exception as e:
+                app_logger.log(
+                    f"[tap_cache] Failed to persist {detector_key} for {serial[:8]}: "
+                    f"{type(e).__name__}: {e}",
+                    "WARNING",
+                )
 
     def _connected_serials(self, log_result: bool = False) -> set[str]:
         """Return serials currently reported by bundled `adb devices`."""
@@ -143,6 +195,7 @@ class DeviceManager:
                 s, DeviceConfig(serial=s)
             ),
             reconnect_capture=lambda s=serial: self._rebuild_backend(s),
+            persist_tap_cache_fn=self.persist_tap_cache,
         )
         self._workers[serial] = worker
         worker.start()
