@@ -72,6 +72,21 @@ pip install -r requirements.txt
 python main.py
 ```
 
+**Windows: expect one UAC prompt at startup.** The app relaunches itself with administrator
+rights because USB port reset (the last-resort recovery for a device that drops off ADB)
+requires an elevated process. Accept the prompt; the original terminal returns immediately
+and the app runs as a new, elevated process. On Linux there is no prompt and no elevation.
+
+- **`python main.py --no-elevate`** skips elevation and runs unelevated. Use it when running
+  under an IDE debugger (the elevated copy is a new process the debugger is not attached to)
+  or for quick UI work. Everything works except USB port reset, and a WARNING is logged.
+- **Declining the UAC prompt** does the same — the app still starts unelevated, with a WARNING.
+- **Hidden console window.** The elevated process opens its own console window. By default it
+  is hidden (**Settings → Startup → Hide console window on launch (Windows)**; takes effect on
+  next restart). While it is hidden, a crash during the earliest startup — before logging is
+  configured — will not be visible. If the app never appears, untick the setting and restart,
+  or run `python main.py --no-elevate` from a terminal to see the error.
+
 ---
 
 ## First-time setup
@@ -140,6 +155,7 @@ Go to the **Settings** tab. Key settings:
 | Unknown stuck threshold | 60s | Time in UNKNOWN state before force-relaunching Roblox |
 | Loop interval | 5s | How often each device checks state |
 | ADB failure threshold | 3 | Consecutive device-not-found failures before worker stops |
+| Hide console window on launch (Windows) | On | Hides the console window of the elevated relaunch; takes effect on next restart |
 
 Per-device intervals (auto-farm, end-run, stay-awake) are configured in each device's **Settings** button on the Main tab.
 

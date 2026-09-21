@@ -21,9 +21,26 @@ from config.constants import (
     NO_ELEVATE_FLAG,
     PLATFORM_WINDOWS,
     SHELLEXECUTE_MAX_ERROR_CODE,
-    SHELLEXECUTE_SW_SHOWNORMAL,
     SHELLEXECUTE_VERB_RUNAS,
+    WIN_SW_HIDE,
+    WIN_SW_SHOWNORMAL,
 )
+
+
+def _launcher_show_command() -> int:
+    """
+    Return the ShellExecuteW nShowCmd for the elevated relaunch, chosen by the
+    suppress_launcher_console setting: WIN_SW_HIDE (hide the extra console window)
+    when True, WIN_SW_SHOWNORMAL when False. Read straight from settings.json
+    because this runs before the settings store is wired up; if the settings
+    cannot be read, fall back to WIN_SW_HIDE, the setting's default.
+    """
+    try:
+        from config.settings import load_settings
+        hide_console = load_settings().suppress_launcher_console
+    except Exception:
+        return WIN_SW_HIDE
+    return WIN_SW_HIDE if hide_console else WIN_SW_SHOWNORMAL
 
 
 def _ensure_admin() -> str:
@@ -68,7 +85,7 @@ def _ensure_admin() -> str:
             sys.executable,
             params,
             os.getcwd(),
-            SHELLEXECUTE_SW_SHOWNORMAL,
+            _launcher_show_command(),
         )
     except Exception:
         return ELEVATION_STATUS_LAUNCH_FAILED

@@ -5,6 +5,7 @@
   "loop_interval_s": 5.0,
   "adb_failure_threshold": 3,
   "development_mode": false,
+  "suppress_launcher_console": true,
   "logging": {
     "log_to_file": true,
     "level": "INFO",

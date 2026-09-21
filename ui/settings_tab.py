@@ -6,11 +6,13 @@ Settings tab — Timing, Recovery, Logging, Debug sections.
 
 from __future__ import annotations
 
+import platform
 import tkinter as tk
 from tkinter import ttk
 from dataclasses import replace
 from typing import Callable
 
+from config.constants import PLATFORM_WINDOWS
 from config.settings import Settings, DebugConfig, LoggingConfig
 
 LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
@@ -141,6 +143,17 @@ class SettingsTab(ttk.Frame):
             "Seconds before a stuck 'Starting…' card clears and shows 'Start failed'.",
         )
 
+        # ---- Startup (Windows) ----
+        section("Startup")
+        self._suppress_console_var, self._suppress_console_cb = bool_field(
+            "Hide console window on launch (Windows)",
+            "Hides the extra console window shown when the app relaunches\n"
+            "itself as administrator.",
+        )
+        note("Takes effect on next restart.", color="#6b7280")
+        if platform.system() != PLATFORM_WINDOWS:
+            self._suppress_console_cb.config(state="disabled")
+
         # ---- Logging (Stream 1 — file) ----
         section("Logging")
         self._log_to_file_var, self._log_to_file_cb = bool_field(
@@ -231,6 +244,7 @@ class SettingsTab(ttk.Frame):
         self._tap_fail_var.set(str(s.tap_failure_threshold))
         self._tap_fail_hard_var.set(str(s.tap_failure_hard_threshold))
         self._start_timeout_var.set(str(s.start_timeout_s))
+        self._suppress_console_var.set(s.suppress_launcher_console)
 
         self._log_to_file_var.set(s.logging.log_to_file)
         self._log_path_var.set(str(s.log_file_path()))
@@ -276,6 +290,7 @@ class SettingsTab(ttk.Frame):
             tap_failure_hard_threshold=_int(self._tap_fail_hard_var, s.tap_failure_hard_threshold),
             start_timeout_s=_float(self._start_timeout_var, s.start_timeout_s),
             development_mode=dev_mode,
+            suppress_launcher_console=self._suppress_console_var.get(),
             logging=replace(
                 s.logging,
                 log_to_file=self._log_to_file_var.get(),

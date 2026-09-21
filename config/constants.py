@@ -168,8 +168,13 @@ NO_ELEVATE_FLAG = "--no-elevate"
 # [INTERNAL] ShellExecuteW verb that triggers the UAC elevation prompt.
 SHELLEXECUTE_VERB_RUNAS = "runas"
 
-# [INTERNAL] ShellExecuteW nShowCmd: SW_SHOWNORMAL - show the window normally.
-SHELLEXECUTE_SW_SHOWNORMAL = 1
+# [INTERNAL] Win32 nShowCmd values passed to ShellExecuteW for the elevated relaunch
+# (Settings.suppress_launcher_console picks between them). Source: Win32 ShowWindow.
+#   WIN_SW_HIDE       (0) - hides the console window the elevated process opens.
+#                           Verified not to hide the app's own Tk window.
+#   WIN_SW_SHOWNORMAL (1) - shows the console window normally.
+WIN_SW_HIDE = 0
+WIN_SW_SHOWNORMAL = 1
 
 # [INTERNAL] ShellExecuteW returns an HINSTANCE; values > 32 mean success and
 # values <= 32 are error codes (e.g. 5 = access denied, which is what a declined
