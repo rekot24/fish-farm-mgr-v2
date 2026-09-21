@@ -278,3 +278,18 @@ PS_FIND_PNP_SCRIPT = (
     "ForEach-Object { $_.InstanceId } } "
     + _PS_FAIL_HANDLER
 )
+
+# ---------------------------------------------------------------------------
+# devices.json persistence (config/devices.py)
+# ---------------------------------------------------------------------------
+
+# [INTERNAL] Suffix of the temp file save_devices() writes next to devices.json before
+# atomically swapping it in (os.replace). Same directory so it is the same volume.
+DEVICES_TMP_SUFFIX = ".tmp"
+
+# [INTERNAL] On Windows os.replace raises PermissionError while another process has the
+# target open (an editor, antivirus, a backup tool). save_devices() retries this many
+# times, DEVICES_SAVE_RETRY_DELAY_S apart (~1 s in total — well past how long a scanner
+# or indexer holds a file), then gives up and raises so a stuck lock is loud, not silent.
+DEVICES_SAVE_RETRIES = 20
+DEVICES_SAVE_RETRY_DELAY_S = 0.05

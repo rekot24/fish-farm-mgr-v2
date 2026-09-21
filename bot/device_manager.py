@@ -31,9 +31,10 @@ USB reset recovery (Level 4, Windows):
     process is not elevated, and at most once per USB_RESET_MIN_INTERVAL_S per device.
 
 Tap-coordinate cache persistence:
-  - Workers never touch devices.json directly. When a worker discovers a new
-    tap coordinate it calls persist_tap_cache(), which serializes all workers'
-    writes behind one lock so concurrent discoveries cannot overwrite each other.
+  - Workers never touch devices.json directly. A worker that discovers a new tap
+    coordinate sets it on the live in-memory config, then calls persist_tap_cache(),
+    which saves that live dict. Memory is the source of truth; save_devices()
+    serializes every writer (UI and workers) behind one lock and writes atomically.
 
 get_all_status() returns an entry for every registered device, not just devices
 with active workers. Devices without workers show running=False and
@@ -45,7 +46,6 @@ from __future__ import annotations
 
 import platform
 import subprocess
-import threading
 import time
 from typing import Callable
 
@@ -59,7 +59,7 @@ from config.constants import (
     USB_RESET_ADB_REAPPEAR_TIMEOUT_S,
     USB_RESET_MIN_INTERVAL_S,
 )
-from config.devices import DeviceConfig, load_devices, save_devices
+from config.devices import DeviceConfig, save_devices
 from config.paths import project_root, adb_exe
 from config.settings import Settings
 from detection.template_bank import TemplateBank
@@ -78,10 +78,6 @@ class DeviceManager:
         self._bank = TemplateBank(project_root=project_root())
         self._workers: dict[str, DeviceWorker] = {}
         self._backends: dict[str, ScrcpySocketBackend] = {}
-        # One lock guards every worker's read-modify-write of devices.json
-        # (see persist_tap_cache). Without it two workers saving at once
-        # would silently overwrite each other's cached coordinate.
-        self._tap_cache_lock = threading.Lock()
         # serial -> monotonic time of the last USB reset attempt (rate limit, see
         # recover_via_usb_reset). Each entry is written only by that device's own
         # worker thread, so no lock is needed.
@@ -95,45 +91,56 @@ class DeviceManager:
 
     def persist_tap_cache(self, serial: str, detector_key: str, x: int, y: int) -> None:
         """
-        Thread-safe write of a single cached tap coordinate to devices.json.
-        Acquires _tap_cache_lock, loads current devices, updates only the one
-        field for this serial + detector, and saves. Logs INFO on success,
-        WARNING on failure. Called by DeviceWorker via callback; workers never
-        call load_devices/save_devices directly.
+        Persist a tap coordinate a worker just cached. The worker has already set
+        cached_tap_x/y on the LIVE in-memory assignment; this saves the live device
+        dict to devices.json (memory is the source of truth, save_devices serializes
+        every writer). Called by DeviceWorker via callback; workers never call
+        load_devices/save_devices directly.
+
+        The coordinate is discarded, with a WARNING, if the live assignment no longer
+        holds it — e.g. the user re-cropped that detector while the worker was still
+        discovering its position: an old-image coordinate must not be stamped onto the
+        new assignment. Also WARNs and writes nothing if the device or detector is gone,
+        or if the save fails; never raises. Logs INFO on success.
         """
-        with self._tap_cache_lock:
-            try:
-                all_devices = load_devices()
-                persisted = all_devices.get(serial)
-                if persisted is None:
-                    # Device removed while its worker was running — nothing to update.
-                    app_logger.log(
-                        f"[tap_cache] Cannot persist {detector_key} for {serial[:8]} — "
-                        f"device not found in devices.json",
-                        "WARNING",
-                    )
-                    return
-                assignment = persisted.detector_assignments.get(detector_key)
-                if assignment is None:
-                    app_logger.log(
-                        f"[tap_cache] Cannot persist {detector_key} for {serial[:8]} — "
-                        f"no such detector assignment in devices.json",
-                        "WARNING",
-                    )
-                    return
-                assignment.cached_tap_x = x
-                assignment.cached_tap_y = y
-                save_devices(all_devices)
+        try:
+            devices = self._get_devices()
+            cfg = devices.get(serial)
+            if cfg is None:
+                # Device removed while its worker was running — nothing to update.
                 app_logger.log(
-                    f"[tap_cache] STORED {detector_key} for {serial[:8]} → ({x}, {y})",
-                    "INFO",
-                )
-            except Exception as e:
-                app_logger.log(
-                    f"[tap_cache] Failed to persist {detector_key} for {serial[:8]}: "
-                    f"{type(e).__name__}: {e}",
+                    f"[tap_cache] Cannot persist {detector_key} for {serial[:8]} — "
+                    f"device not found in the device list",
                     "WARNING",
                 )
+                return
+            assignment = cfg.detector_assignments.get(detector_key)
+            if assignment is None:
+                app_logger.log(
+                    f"[tap_cache] Cannot persist {detector_key} for {serial[:8]} — "
+                    f"no such detector assignment",
+                    "WARNING",
+                )
+                return
+            if (assignment.cached_tap_x, assignment.cached_tap_y) != (x, y):
+                app_logger.log(
+                    f"[tap_cache] Discarding stale coordinate ({x}, {y}) for "
+                    f"{detector_key} on {serial[:8]} — the assignment was replaced or "
+                    f"cleared while it was being discovered",
+                    "WARNING",
+                )
+                return
+            save_devices(devices)
+            app_logger.log(
+                f"[tap_cache] STORED {detector_key} for {serial[:8]} → ({x}, {y})",
+                "INFO",
+            )
+        except Exception as e:
+            app_logger.log(
+                f"[tap_cache] Failed to persist {detector_key} for {serial[:8]}: "
+                f"{type(e).__name__}: {e}",
+                "WARNING",
+            )
 
     def _connected_serials(
         self, log_result: bool = False, use_cache: bool = False
