@@ -125,7 +125,8 @@ class SettingsTab(ttk.Frame):
         section("Recovery")
         self._adb_fail_var, _ = str_field(
             "ADB failure threshold",
-            "Consecutive 'device not found' failures before worker stops.\n"
+            "Consecutive 'device not found / offline' failures before USB reset\n"
+            "recovery is tried and the worker stops.\n"
             "Must be consecutive — any successful contact resets the count.",
         )
         self._tap_fail_var, _ = str_field(

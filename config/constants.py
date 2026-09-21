@@ -113,6 +113,19 @@ ADB_FOREGROUND_CHECK_SHELL_CMD = (
     "dumpsys window displays | grep -E 'mCurrentFocus|mFocusedApp'"
 )
 
+# [INTERNAL] Regex for adb CLIENT errors that mean "this device is gone": the phone
+# dropped off ADB ("not found") or its transport is unusable ("offline"). Matched against
+# stderr of a failed (non-zero exit) `adb -s <serial> ...` call. Real wording, verified on
+# the bundled adb with a serial that had dropped off ADB:
+#     adb.exe: device 'R5CW91E12GX' not found      (shell / most commands)
+#     error: device 'R5CW91E12GX' not found        (get-state)
+#     error: device offline                        (ADB Offline state)
+# and the pre-serial wording `device not found` is still accepted. Deliberately NOT
+# matched: `device unauthorized` / `device still connecting` (need a person, a USB reset
+# cannot fix them), `more than one device` and timeouts (a slow phone is not a dead one).
+# The `adb:` / `error:` prefix keeps a shell command's own stderr from matching.
+ADB_DEVICE_GONE_PATTERN = r"(?:adb(?:\.exe)?|error): device (?:'[^']*' )?(?:not found|offline)"
+
 # [INTERNAL] Max 32-bit integer — used as "never timeout" for ADB screen_off_timeout.
 MAX_INT32 = 2_147_483_647
 
@@ -265,3 +278,18 @@ PS_FIND_PNP_SCRIPT = (
     "ForEach-Object { $_.InstanceId } } "
     + _PS_FAIL_HANDLER
 )
+
+# ---------------------------------------------------------------------------
+# devices.json persistence (config/devices.py)
+# ---------------------------------------------------------------------------
+
+# [INTERNAL] Suffix of the temp file save_devices() writes next to devices.json before
+# atomically swapping it in (os.replace). Same directory so it is the same volume.
+DEVICES_TMP_SUFFIX = ".tmp"
+
+# [INTERNAL] On Windows os.replace raises PermissionError while another process has the
+# target open (an editor, antivirus, a backup tool). save_devices() retries this many
+# times, DEVICES_SAVE_RETRY_DELAY_S apart (~1 s in total — well past how long a scanner
+# or indexer holds a file), then gives up and raises so a stuck lock is loud, not silent.
+DEVICES_SAVE_RETRIES = 20
+DEVICES_SAVE_RETRY_DELAY_S = 0.05

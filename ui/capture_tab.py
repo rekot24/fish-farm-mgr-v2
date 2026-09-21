@@ -32,7 +32,7 @@ import cv2
 import numpy as np
 
 from bot.device_manager import DeviceManager
-from config.devices import DeviceConfig, load_devices, save_devices, DetectorAssignment
+from config.devices import DeviceConfig, DetectorAssignment
 from config.paths import project_root, adb_exe
 from config.constants import ADB_SCREENCAP_TIMEOUT_S, DETECTION_THRESHOLD
 
@@ -75,10 +75,18 @@ class CaptureTab(ttk.Frame):
         parent,
         manager: DeviceManager,
         get_devices: Callable[[], dict[str, DeviceConfig]],
+        save_devices_fn: Callable[[dict[str, DeviceConfig]], None],
     ):
+        """
+        get_devices / save_devices_fn are the app's device store: get_devices returns the
+        LIVE in-memory dict that every worker reads, save_devices_fn persists it. This tab
+        edits that dict and saves it through save_devices_fn — it never writes
+        devices.json itself.
+        """
         super().__init__(parent)
         self._manager = manager
         self._get_devices = get_devices
+        self._save_devices = save_devices_fn
         self._selected_serial = tk.StringVar()
         self._selected_detector = tk.StringVar(value=DETECTOR_NAMES[0])
         self._serial_list: list[str] = []
@@ -527,9 +535,11 @@ class CaptureTab(ttk.Frame):
             tap_offset_y=existing.tap_offset_y if (existing and same_image) else None,
             cached_tap_x=None,   # always cleared — worker rediscovers on next use
             cached_tap_y=None,
+            # A property of the detector (floating position), not of the image — keep it.
+            always_detect=existing.always_detect if existing else False,
         )
         cfg.detector_assignments[detector_name] = new_assignment
-        save_devices(devices)
+        self._save_devices(devices)
 
         if self._manager:
             self._manager.invalidate_template(detector_name, serial)
@@ -564,7 +574,7 @@ class CaptureTab(ttk.Frame):
             return
 
         del cfg.detector_assignments[detector_name]
-        save_devices(devices)
+        self._save_devices(devices)
 
         if self._manager:
             self._manager.invalidate_template(detector_name, serial)
@@ -611,6 +621,8 @@ class CaptureTab(ttk.Frame):
         try:
             from tools.crop_tool import CropTool
             tool = CropTool(self, serial=serial, detector_name=detector,
+                            get_devices=self._get_devices,
+                            save_devices_fn=self._save_devices,
                             manager=self._manager,
                             detector_names=DETECTOR_NAMES)
             self.wait_window(tool)

@@ -17,22 +17,28 @@ ADB behavior:
   - A device must be present in `adb devices` before scrcpy startup begins.
   - Status snapshots include adb_connected so the UI can distinguish a normal
     stopped card from a phone whose USB/ADB transport has dropped.
-  - The status-poll path (get_all_status / get_status) reuses the last
-    `adb devices` result for ADB_STATUS_CACHE_TTL_S so the 2s UI poll does not
-    spawn a subprocess every time. start_device / _rebuild_backend /
-    discover_devices always query live — they need a current answer.
+  - get_all_status / get_status are called on the Tk thread every 2 s and NEVER
+    run adb. They read the last `adb devices` snapshot and, once it is older than
+    ADB_STATUS_CACHE_TTL_S, start ONE background refresh (single-flight) and return
+    the old snapshot immediately, so a slow or hung adb can never freeze the UI.
+    Until the first refresh finishes adb_connected is simply absent from the status
+    (consumers default it to True). start_device / _rebuild_backend /
+    discover_devices / the USB-reset poll query live from worker or background
+    threads — they need a current answer.
 
 USB reset recovery (Level 4, Windows):
-  - When a worker reaches adb_failure_threshold it calls recover_via_usb_reset()
+  - When a worker reaches adb_failure_threshold — or its Level 3 scrcpy rebuild
+    fails after repeated tap failures — it calls recover_via_usb_reset()
     (callback) instead of stopping straight away: USB power cycle via PowerShell
     Disable-/Enable-PnpDevice, poll `adb devices` until the phone returns, then rebuild
     the scrcpy backend. Skipped when the device's pnp_instance_id is blank, when the
     process is not elevated, and at most once per USB_RESET_MIN_INTERVAL_S per device.
 
 Tap-coordinate cache persistence:
-  - Workers never touch devices.json directly. When a worker discovers a new
-    tap coordinate it calls persist_tap_cache(), which serializes all workers'
-    writes behind one lock so concurrent discoveries cannot overwrite each other.
+  - Workers never touch devices.json directly. A worker that discovers a new tap
+    coordinate sets it on the live in-memory config, then calls persist_tap_cache(),
+    which saves that live dict. Memory is the source of truth; save_devices()
+    serializes every writer (UI and workers) behind one lock and writes atomically.
 
 get_all_status() returns an entry for every registered device, not just devices
 with active workers. Devices without workers show running=False and
@@ -58,7 +64,7 @@ from config.constants import (
     USB_RESET_ADB_REAPPEAR_TIMEOUT_S,
     USB_RESET_MIN_INTERVAL_S,
 )
-from config.devices import DeviceConfig, load_devices, save_devices
+from config.devices import DeviceConfig, save_devices
 from config.paths import project_root, adb_exe
 from config.settings import Settings
 from detection.template_bank import TemplateBank
@@ -77,85 +83,88 @@ class DeviceManager:
         self._bank = TemplateBank(project_root=project_root())
         self._workers: dict[str, DeviceWorker] = {}
         self._backends: dict[str, ScrcpySocketBackend] = {}
-        # One lock guards every worker's read-modify-write of devices.json
-        # (see persist_tap_cache). Without it two workers saving at once
-        # would silently overwrite each other's cached coordinate.
-        self._tap_cache_lock = threading.Lock()
         # serial -> monotonic time of the last USB reset attempt (rate limit, see
         # recover_via_usb_reset). Each entry is written only by that device's own
         # worker thread, so no lock is needed.
         self._last_usb_reset_at: dict[str, float] = {}
-        # Last successful `adb devices` result for the status-poll path. Written
-        # and read only from the UI thread (get_all_status / get_status), so no
-        # lock. -inf (not 0.0) so the first poll always queries live — monotonic()
-        # counts from boot on Windows and could otherwise look "fresh" right after boot.
-        self._adb_connected_cache: set[str] = set()
-        self._adb_cache_updated_at: float = float("-inf")
+        # Last `adb devices` result for the status poll: (monotonic time, serials), or
+        # None until the first background refresh finishes. Written only by
+        # _refresh_adb_status and replaced as one tuple, so the UI thread reading it
+        # needs no lock.
+        self._adb_status: tuple[float, frozenset[str]] | None = None
+        # Single-flight guard: held for the whole life of a background refresh, so
+        # polls arriving while adb is slow or hung never start a second subprocess.
+        self._adb_refresh_lock = threading.Lock()
 
     def persist_tap_cache(self, serial: str, detector_key: str, x: int, y: int) -> None:
         """
-        Thread-safe write of a single cached tap coordinate to devices.json.
-        Acquires _tap_cache_lock, loads current devices, updates only the one
-        field for this serial + detector, and saves. Logs INFO on success,
-        WARNING on failure. Called by DeviceWorker via callback; workers never
-        call load_devices/save_devices directly.
+        Persist a tap coordinate a worker just cached. The worker has already set
+        cached_tap_x/y on the LIVE in-memory assignment; this saves the live device
+        dict to devices.json (memory is the source of truth, save_devices serializes
+        every writer). Called by DeviceWorker via callback; workers never call
+        load_devices/save_devices directly.
+
+        The coordinate is discarded, with a WARNING, if the live assignment no longer
+        holds it — e.g. the user re-cropped that detector while the worker was still
+        discovering its position: an old-image coordinate must not be stamped onto the
+        new assignment. Also WARNs and writes nothing if the device or detector is gone,
+        or if the save fails; never raises. Logs INFO on success.
         """
-        with self._tap_cache_lock:
-            try:
-                all_devices = load_devices()
-                persisted = all_devices.get(serial)
-                if persisted is None:
-                    # Device removed while its worker was running — nothing to update.
-                    app_logger.log(
-                        f"[tap_cache] Cannot persist {detector_key} for {serial[:8]} — "
-                        f"device not found in devices.json",
-                        "WARNING",
-                    )
-                    return
-                assignment = persisted.detector_assignments.get(detector_key)
-                if assignment is None:
-                    app_logger.log(
-                        f"[tap_cache] Cannot persist {detector_key} for {serial[:8]} — "
-                        f"no such detector assignment in devices.json",
-                        "WARNING",
-                    )
-                    return
-                assignment.cached_tap_x = x
-                assignment.cached_tap_y = y
-                save_devices(all_devices)
+        try:
+            devices = self._get_devices()
+            cfg = devices.get(serial)
+            if cfg is None:
+                # Device removed while its worker was running — nothing to update.
                 app_logger.log(
-                    f"[tap_cache] STORED {detector_key} for {serial[:8]} → ({x}, {y})",
-                    "INFO",
-                )
-            except Exception as e:
-                app_logger.log(
-                    f"[tap_cache] Failed to persist {detector_key} for {serial[:8]}: "
-                    f"{type(e).__name__}: {e}",
+                    f"[tap_cache] Cannot persist {detector_key} for {serial[:8]} — "
+                    f"device not found in the device list",
                     "WARNING",
                 )
+                return
+            assignment = cfg.detector_assignments.get(detector_key)
+            if assignment is None:
+                app_logger.log(
+                    f"[tap_cache] Cannot persist {detector_key} for {serial[:8]} — "
+                    f"no such detector assignment",
+                    "WARNING",
+                )
+                return
+            if (assignment.cached_tap_x, assignment.cached_tap_y) != (x, y):
+                app_logger.log(
+                    f"[tap_cache] Discarding stale coordinate ({x}, {y}) for "
+                    f"{detector_key} on {serial[:8]} — the assignment was replaced or "
+                    f"cleared while it was being discovered",
+                    "WARNING",
+                )
+                return
+            save_devices(devices)
+            app_logger.log(
+                f"[tap_cache] STORED {detector_key} for {serial[:8]} → ({x}, {y})",
+                "INFO",
+            )
+        except Exception as e:
+            app_logger.log(
+                f"[tap_cache] Failed to persist {detector_key} for {serial[:8]}: "
+                f"{type(e).__name__}: {e}",
+                "WARNING",
+            )
 
-    def _connected_serials(
-        self, log_result: bool = False, use_cache: bool = False
-    ) -> set[str]:
+    def _connected_serials(self, log_result: bool = False) -> set[str]:
         """
-        Return serials currently reported by bundled `adb devices`.
+        Run a LIVE bundled `adb devices` and return the serials in the "device" state.
+
+        Blocks for as long as adb takes (up to the 10 s timeout), so it must NEVER be
+        called on the UI thread. The status poll reads _adb_status_snapshot() instead;
+        start_device / _rebuild_backend / discover_devices / the USB-reset poll call
+        this directly from worker or background threads because they need a current
+        answer.
 
         Args:
-            log_result : log the discovered serials at INFO (live queries only)
-            use_cache  : status-poll path only. Return the last successful result
-                         if it is younger than ADB_STATUS_CACHE_TTL_S; otherwise
-                         query live and refresh the cache. Default False = always
-                         query live and leave the cache untouched, which is what
-                         start_device / _rebuild_backend / discover_devices need.
+            log_result : log the discovered serials at INFO
 
         Returns:
-            Set of serials in the "device" state. Empty set if the query fails;
-            a failed query is never cached, so the next poll retries.
+            Set of serials in the "device" state. Empty set if the query fails (logged).
         """
-        if use_cache and (
-            time.monotonic() - self._adb_cache_updated_at < ADB_STATUS_CACHE_TTL_S
-        ):
-            return self._adb_connected_cache
         try:
             result = subprocess.run(
                 [adb_exe(), "devices"],
@@ -173,13 +182,45 @@ class DeviceManager:
                     f"[manager] Discovered {len(serials)} device(s): {sorted(serials)}",
                     "INFO",
                 )
-            if use_cache:
-                self._adb_connected_cache = serials
-                self._adb_cache_updated_at = time.monotonic()
             return serials
         except Exception as e:
             app_logger.log(f"[manager] discover_devices error: {e}", "ERROR")
             return set()
+
+    def _refresh_adb_status(self) -> None:
+        """
+        Background-thread body: run a live `adb devices`, publish the result, and release
+        the single-flight lock. A failed query publishes an empty set (every card shows
+        ADB offline, as before) and is retried after one ADB_STATUS_CACHE_TTL_S.
+        """
+        try:
+            serials = self._connected_serials()
+            self._adb_status = (time.monotonic(), frozenset(serials))
+        finally:
+            self._adb_refresh_lock.release()
+
+    def _adb_status_snapshot(self) -> frozenset[str] | None:
+        """
+        Return the last known set of ADB-connected serials WITHOUT ever blocking, so it
+        is safe on the Tk thread. If the snapshot is missing or older than
+        ADB_STATUS_CACHE_TTL_S and no refresh is running, start one background refresh
+        (single-flight) and still return what we have right now.
+
+        Returns:
+            frozenset of serials in the "device" state, or None if no refresh has
+            finished yet (state unknown).
+        """
+        status = self._adb_status
+        stale = status is None or time.monotonic() - status[0] >= ADB_STATUS_CACHE_TTL_S
+        if stale and self._adb_refresh_lock.acquire(blocking=False):
+            try:
+                threading.Thread(
+                    target=self._refresh_adb_status, name="adb-status-refresh", daemon=True
+                ).start()
+            except Exception:
+                self._adb_refresh_lock.release()
+                raise
+        return None if status is None else status[1]
 
     def discover_devices(self) -> list[str]:
         """Run bundled adb devices and return connected serials."""
@@ -429,13 +470,15 @@ class DeviceManager:
         Last automated recovery step for an unresponsive device: USB power cycle,
         wait for ADB to see the phone again, then rebuild the scrcpy backend.
 
-        Called by the device's worker (via callback) when it reaches
-        adb_failure_threshold, just before it would stop itself. Blocks the calling
+        Called by the device's worker (via callback) just before it would stop
+        itself: when it reaches adb_failure_threshold, or when its Level 3 scrcpy
+        rebuild fails after repeated tap failures. Blocks the calling
         worker thread — acceptable, that device has nothing else to do.
 
-        Skips (returns False) when the per-device pnp_instance_id is blank, the app is
-        not elevated, the platform is not Windows, or this device was already reset
-        within USB_RESET_MIN_INTERVAL_S (stops a flapping phone being power-cycled
+        Skips (returns False) when the device's worker is not running (it was stopped
+        meanwhile — never power-cycle a phone the user just stopped), the per-device
+        pnp_instance_id is blank, the app is not elevated, the platform is not
+        Windows, or this device was already reset within USB_RESET_MIN_INTERVAL_S (stops a flapping phone being power-cycled
         in a loop).
 
         Returns:
@@ -444,6 +487,13 @@ class DeviceManager:
             False — recovery skipped or failed; the worker stops itself as before.
         """
         tag = serial[:8]
+        worker = self._workers.get(serial)
+        if worker is None or not worker.is_running:
+            app_logger.log(
+                f"[manager] USB reset for {tag} skipped — its worker is not running",
+                "WARNING")
+            return False
+
         last = self._last_usb_reset_at.get(serial)
         if last is not None and time.monotonic() - last < USB_RESET_MIN_INTERVAL_S:
             app_logger.log(
@@ -477,59 +527,54 @@ class DeviceManager:
         for serial in list(serials):
             self.stop_device(serial)
 
+    @staticmethod
+    def _stopped_status(serial: str, cfg: DeviceConfig) -> dict:
+        """Status dict for a registered device that has no running worker."""
+        return {
+            "serial": serial,
+            "nickname": cfg.nickname,
+            "model": cfg.model,
+            "account": cfg.account,
+            "running": False,
+            "state": "UNKNOWN",
+            "last_action": "—",
+            "runtime_s": 0.0,
+            "auto_farm_countdown_s": 0.0,
+            "end_run_countdown_s": 0.0,
+        }
+
     def get_all_status(self) -> list[dict]:
-        """Return a status snapshot for every registered device."""
+        """
+        Return a status snapshot for every registered device. Called on the Tk thread
+        every 2 s, so it never runs adb (see _adb_status_snapshot). adb_connected is
+        omitted until the first `adb devices` refresh has finished; consumers treat a
+        missing key as connected.
+        """
         devices = self._get_devices()
-        connected_serials = self._connected_serials(use_cache=True)
+        snapshot = self._adb_status_snapshot()
         result = []
         for serial, cfg in devices.items():
             worker = self._workers.get(serial)
-            adb_connected = serial in connected_serials
-            if worker:
-                status = worker.get_status()
-                status["adb_connected"] = adb_connected
-                result.append(status)
-            else:
-                result.append({
-                    "serial": serial,
-                    "nickname": cfg.nickname,
-                    "model": cfg.model,
-                    "account": cfg.account,
-                    "running": False,
-                    "state": "UNKNOWN",
-                    "adb_connected": adb_connected,
-                    "last_action": "—",
-                    "runtime_s": 0.0,
-                    "auto_farm_countdown_s": 0.0,
-                    "end_run_countdown_s": 0.0,
-                })
+            status = worker.get_status() if worker else self._stopped_status(serial, cfg)
+            if snapshot is not None:
+                status["adb_connected"] = serial in snapshot
+            result.append(status)
         return result
 
     def get_status(self, serial: str) -> dict | None:
-        adb_connected = serial in self._connected_serials(use_cache=True)
+        """One device's status, or None if it is not registered. Never runs adb."""
+        snapshot = self._adb_status_snapshot()
         worker = self._workers.get(serial)
         if worker:
             status = worker.get_status()
-            status["adb_connected"] = adb_connected
-            return status
-
-        devices = self._get_devices()
-        cfg = devices.get(serial)
-        if cfg:
-            return {
-                "serial": serial,
-                "nickname": cfg.nickname,
-                "model": cfg.model,
-                "account": cfg.account,
-                "running": False,
-                "state": "UNKNOWN",
-                "adb_connected": adb_connected,
-                "last_action": "—",
-                "runtime_s": 0.0,
-                "auto_farm_countdown_s": 0.0,
-                "end_run_countdown_s": 0.0,
-            }
-        return None
+        else:
+            cfg = self._get_devices().get(serial)
+            if cfg is None:
+                return None
+            status = self._stopped_status(serial, cfg)
+        if snapshot is not None:
+            status["adb_connected"] = serial in snapshot
+        return status
 
     def force_end_run(self, serial: str) -> None:
         worker = self._workers.get(serial)

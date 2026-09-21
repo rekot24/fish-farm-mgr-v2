@@ -15,6 +15,7 @@ logs/
 
 # Config (real device data — never commit)
 config/devices.json
+config/devices.json.tmp
 config/settings.json
 
 # Config examples are committed — real files are not

@@ -45,6 +45,7 @@ If asked to do something that conflicts with those standards, flag it before pro
 - `tools/crop_tool.py` — image capture with zoom, square/circle crop, preview
 - `tools/coordinate_finder.py` — ADB coordinate helper utility
 - `tools/usb_pnp.py` — Windows PnP lookup + USB power-cycle via PowerShell (USB reset recovery); also a CLI: `python -m tools.usb_pnp detect|reset <adb_serial>`
+- `tools/adb_errors.py` — recognizes adb "device gone" errors (`not found` / `offline`) from exit code + stderr; wording in `ADB_DEVICE_GONE_PATTERN`
 
 ---
 
@@ -123,7 +124,12 @@ Each device card shows:
 - **2026-09-20** PowerShell hardening for the elevated process: the InstanceId travels in an environment variable and is format-validated (never interpolated into script source); `-ErrorAction Stop` so failures are non-zero exits; Enable is always attempted (retried once) even if Disable failed; ADB return is polled, not a blind sleep.
 - **2026-09-20** The scrcpy decode thread throttles only the BGR conversion (`SCRCPY_DECODE_FRAME_INTERVAL_S`); it decodes every packet and never sleeps, because it is also the thread that drains the socket.
 - **2026-09-20** Foreground check is `dumpsys window displays | grep -E 'mCurrentFocus|mFocusedApp'` and matches Roblox on ANY returned line (multi-display devices emit `=null` lines first).
-- **2026-09-20** Workers never touch devices.json: tap-coordinate persistence goes through `DeviceManager.persist_tap_cache()` under one lock. The status poll reuses `adb devices` for `ADB_STATUS_CACHE_TTL_S`; `_connected_serials()` is live by default (`use_cache=False`).
+- **2026-09-20** Workers never touch devices.json: tap-coordinate persistence goes through `DeviceManager.persist_tap_cache()`, which saves the live in-memory dict (this replaced the first design's disk read-modify-write — see the follow-up decisions below).
+- **2026-09-20 (follow-up)** **Memory is the source of truth for devices; devices.json is its mirror.** `save_devices()` is the ONLY writer and is thread-safe and atomic (module lock, temp file + fsync + `os.replace`, retried on Windows `PermissionError`). Every UI/tool path edits the live dict and saves through the injected `get_devices` / `save_devices_fn` — nothing edits a private `load_devices()` snapshot (that left memory stale and the next save silently reverted the change). `persist_tap_cache` discards a coordinate whose assignment was replaced mid-discovery.
+- **2026-09-20 (follow-up)** "Device gone" means adb says `device 'X' not found` or `device offline` (`tools/adb_errors.py`; non-zero exit, stderr only, `adb:`/`error:` prefix). NOT counted: `unauthorized` / `still connecting` (need a person; a USB reset cannot fix them) and timeouts (a slow phone is not a dead one). A received frame still resets the ADB-failure counter (a stale frame from a wedged stream is not counted) — decided, revisit if seen.
+- **2026-09-20 (follow-up)** Tap-failure ladder: the soft (adb reconnect) attempt does NOT reset the counter; the hard threshold is checked first; a failed Level 3 rebuild tries USB reset (`_try_usb_reset_recovery`, shared with the ADB-failure path) before the worker stops. `recover_via_usb_reset` refuses to run for a stopped worker.
+- **2026-09-20 (follow-up)** **ADB never runs on the Tk thread.** `get_all_status`/`get_status` read a snapshot and start one single-flight background refresh when it is older than `ADB_STATUS_CACHE_TTL_S` (`adb_connected` is omitted until the first result; the UI defaults it to True); `_connected_serials()` is live-only and only for worker/background threads. Every `subprocess` call in `ui/` must be inside a thread target (checked statically). `App._poll` logs failures (once per distinct message) instead of swallowing them.
+- **2026-09-20 (follow-up)** Reading the code is not enough to claim a failure mode: my "tap failures reach the rebuild" analysis was wrong until a simulation showed the counter never got past 4. Reproduce the failure with the real loop / real adb output before proposing or writing a fix.
 
 ## Tried and rejected
 
@@ -138,19 +144,34 @@ Each device card shows:
 - **2026-09-20** The `Get-PnpDevice | Where FriendlyName -like '*Android*'` query for the PnP ID (roadmap 8-H) — returns opaque Samsung `&ADB` interface nodes and stale ghosts, and no Pixels.
 - **2026-09-20** Wiring USB reset inside `_rebuild_backend` (roadmap 8-H) — not on the path a phone dropping off ADB takes (that ends in the worker's ADB-failure stop).
 - **2026-09-20** Unconditional elevation with no opt-out, and a settings-store `require_admin` flag — the former blocks IDE debugging, the latter needs settings loaded before the UAC relaunch. `--no-elevate` was chosen.
+- **2026-09-20 (follow-up)** Hooking USB reset into the tap-failure rebuild path BEFORE fixing the ladder — the hard threshold was unreachable (soft reset the counter), so it would have been dead code. Fixed the ladder first.
+- **2026-09-20 (follow-up)** `persist_tap_cache` as a disk read-modify-write under a manager lock — cannot protect against UI writers that save memory, and could stamp an old-image coordinate onto a re-cropped assignment. Replaced by saving the live dict.
+- **2026-09-20 (follow-up)** Counting adb timeouts or `unauthorized` as "device gone" — would power-cycle slow or merely unauthorized phones. Counting a stale frame toward the ADB-failure counter (restructuring the loop) — declined for now.
+- **2026-09-20 (follow-up)** Matching adb's error text against stdout, or without the `adb:`/`error:` prefix — stdout is arbitrary command output (ps, dumpsys) and a shell command's own stderr could match.
+- **2026-09-20 (follow-up)** 5 x 50 ms retries for the atomic `os.replace` — a stress test with a busy reader exhausted it on Windows; widened to 20 x 50 ms.
 
 ---
 
 ## Current state
 
-- Working: Phases 0–8 complete (see ROADMAP.md). Per-device workers (capture → detect → if/elif state → act) across the fleet on scrcpy capture; state-driven rejoin navigation; crop tool; redesigned UI. Phase 8 long-run stability fixes are in: thread-safe tap-cache persistence (8-A), cached `adb devices` on the status poll (8-B), lightweight foreground check (8-C), throttled BGR conversion in the decode thread (8-D), `_latest_frame` lock (8-E). Windows self-elevation via UAC with `--no-elevate` and a `suppress_launcher_console` setting, and USB port reset recovery (Level 4) with a per-device PnP Instance ID + Detect button (8-H) — the UAC relaunch and `python -m tools.usb_pnp detect|reset` were verified on real hardware.
-- In progress: nothing. Branch `phase-8-long-run-stability` holds all Phase 8 work and is ready for review/merge into `main` (not merged).
-- Known broken / unverified: (1) the Phase 8 goal itself — no reboot needed after 12–18 h — has NOT been confirmed by a long run; (2) the automatic USB-reset path (worker hits ADB-failure threshold → reset → poll → rebuild) is covered by mocked tests only; (3) rejoin navigation is still untested end-to-end on a live crash; (4) open Pending fixes in ROADMAP.md: `_DEVICE_NOT_FOUND` text mismatch (adb prints `device 'X' not found`, so the sentinel likely never fires), `replace_capture_backend` clears the wrong attribute, UI saves not serialized with the tap-cache lock, `get_all_status()` runs adb on the Tk thread, DeviceCard "Starting…" stuck on failed start.
-- Next: review/merge the Phase 8 branch; run an overnight soak to confirm the degradation is gone; then the `_DEVICE_NOT_FOUND` fix (it gates the ADB-failure counter that triggers USB reset).
+- Working: Phases 0–8 and the Phase 8 follow-up are complete, merged to `main` and pushed (see ROADMAP.md). Per-device workers (capture → detect → if/elif state → act) on scrcpy capture; state-driven rejoin navigation; crop tool; redesigned UI. Phase 8: thread-safe persistence, throttled decode, lightweight foreground check, frame lock, Windows UAC self-elevation (`--no-elevate`, `suppress_launcher_console`), and USB port reset recovery (Level 4) with a per-device PnP Instance ID + Detect button. Follow-up: adb "device gone" wording fixed (`tools/adb_errors.py`), tap-failure ladder now reaches the scrcpy rebuild and then USB reset, memory-as-source-of-truth device persistence (atomic `save_devices`, crop tool/capture tab through the live store), and ADB never on the Tk thread (non-blocking status poll, End run and Add device on threads, poll errors logged).
+- In progress: nothing. `main` and `origin/main` are in sync; the Phase 8 and follow-up branches are deleted.
+- Known broken / unverified: (1) the Phase 8 goal itself — no reboot after 12–18 h — has NOT been confirmed by a soak; (2) verified with mocks, simulations of the real worker loop, real adb output and real PowerShell, but never on the farm for a long run: the tap-failure ladder now really rebuilds scrcpy after 10 failed taps (never ran on hardware before) and the automatic USB-reset path; (3) a stale frame still resets the ADB-failure counter (decided; see Key decisions); (4) rejoin navigation is still untested end-to-end on a live crash; (5) open Pending fixes in ROADMAP.md: `replace_capture_backend` clears `_latest_frame` instead of `_last_frame`, DeviceCard "Starting…" stuck on failed start, dead `reload_devices` wiring.
+- Next: run the overnight soak and read `logs/app.log` for the new WARNING lines (`Device gone`, `Tap failures reached`, `USB reset`, `Main tab refresh failed`); then the small Pending fixes.
+
 
 ---
 
 ## Session log
+
+### 2026-09-20 — Phase 8 follow-up (recovery-chain hardening), branch `phase-8-followup`
+Pushed `main`, branched, read ROADMAP.md and CLAUDE.md in full, then worked three items one at a time (explain → confirm → implement → test → commit). Each premise was checked against the code and real adb output first; two of my own claims were corrected along the way.
+- **Item 1 — `_DEVICE_NOT_FOUND`.** Confirmed the text mismatch (adb prints `device 'X' not found`) but the premise was only partly right: the scrcpy-disconnected path already counted. Measured with the real worker loop: a "connected" backend with no frame never counted and spammed `launch_roblox`. Fixed with `tools/adb_errors.py` (`not found` + `offline`). While tracing it found two more breaks: the tap-failure ladder reset its counter at the soft threshold so Level 3 was unreachable (100 failures → adb reconnect ×20, rebuild ×0), and no USB reset was tried when the rebuild failed. Fixed the ladder, then added the USB-reset attempt as a separate commit. My first claim about the tap path was wrong until a simulation disproved it.
+- **Item 2 — UI saves bypassing the lock.** Inventory of every devices.json writer. Found a bigger bug: `CropTool._save` edited a disk snapshot and never the live dict, so workers kept the old assignment and the next unrelated UI save reverted the crop (reproduced with the real `_save`). Made memory the source of truth: atomic, lock-protected `save_devices()`, `persist_tap_cache` saves the live dict and discards stale coordinates, crop tool / capture tab go through the store. Also stopped re-crop / re-assign resetting `always_detect`.
+- **Item 3 — ADB on the Tk thread.** Traced `App._poll` → `get_all_status` → `adb devices`; measured 2 s / 10 s freezes for slow / hung adb. Non-blocking status poll (snapshot + single-flight background refresh); End run and Add device moved to threads; static check that every `subprocess` call in `ui/` is a thread target; `App._poll` now logs failures.
+- **Commits:** 3 (item 1), 2 (item 2), 4 (item 3), then ROADMAP. **Tests:** every change has a test, and the key fixes have a measured before/after (the mismatch, the tap ladder, the crop-tool overwrite, the UI-thread blocking); tests use real adb / PowerShell / phones where possible; the full suite (17 scripts) was green before merging.
+- **Decisions:** all recorded above (memory source of truth, device-gone definition, ladder + shared USB-reset recovery, ADB never on Tk thread, reproduce before fixing).
+- Next: see Current state.
 
 ### 2026-09-20 — Phase 8 (long-run stability), branch `phase-8-long-run-stability`
 Phases 2–7 were built in earlier sessions and are recorded in ROADMAP.md, not here. Worked 8-A → 8-H one item at a time: read the listed files, explained the plan, waited for confirmation, implemented, tested, committed separately. Every roadmap prescription was checked against the code and real devices first.
@@ -164,7 +185,7 @@ Phases 2–7 were built in earlier sessions and are recorded in ROADMAP.md, not 
 - **8-H Part 2** `tools/usb_pnp.py`, `pnp_instance_id`, Device Settings field + Detect button, `reset_usb_port` / `recover_via_usb_reset`, wired at the worker's ADB-failure threshold (not `_rebuild_backend`). CLI reset confirmed on hardware (Note 20 Ultra re-enumerated).
 - **Findings logged** in ROADMAP: `_DEVICE_NOT_FOUND` text mismatch, `replace_capture_backend` wrong attribute, unserialized UI saves, adb on the Tk thread, uhubctl for Linux.
 - **Decisions made** (all recorded above): self-elevate with `--no-elevate` opt-out; USB reset = Level 4 at the ADB-failure threshold with a 10-minute per-device rate limit; PnP ID = top-level USB device ending in the ADB serial, env-var-injected and validated; roadmap items are hypotheses to verify first.
-- **Process note:** ROADMAP 8-C, 8-D, 8-F, 8-G and 8-H were rewritten in the check-off pass to describe what was built, not what was prescribed. The whole branch is Phase 8 only; nothing was pushed or merged.
+- **Process note:** ROADMAP 8-C, 8-D, 8-F, 8-G and 8-H were rewritten in the check-off pass to describe what was built, not what was prescribed. The branch was merged to `main` with a merge commit and pushed at the start of the follow-up session.
 - Next: see Current state.
 
 ### 2026-09-10 — Session 1

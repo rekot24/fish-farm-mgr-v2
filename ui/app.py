@@ -8,6 +8,7 @@ Wires the debug panel callback into app_logger after UI is built.
 from __future__ import annotations
 
 import tkinter as tk
+import traceback
 from tkinter import ttk
 from typing import Callable
 
@@ -42,6 +43,8 @@ class App(tk.Tk):
         self._reload_devices = reload_devices
         self._save_settings = save_settings_fn
         self._save_devices = save_devices_fn
+        # "Type: message" of the last poll failure that was logged; None while polls succeed.
+        self._last_poll_error: str | None = None
 
         self.title("Be Fish Farm Manager v2")
         self.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
@@ -80,6 +83,7 @@ class App(tk.Tk):
             notebook,
             manager=self._manager,
             get_devices=self._get_devices,
+            save_devices_fn=self._save_devices,
         )
         self._settings_tab = SettingsTab(
             notebook,
@@ -97,11 +101,30 @@ class App(tk.Tk):
         self._poll()
 
     def _poll(self) -> None:
+        """
+        Refresh the Main tab every POLL_INTERVAL_MS. A failing refresh must not stop the
+        poll loop, but it must not be silent either: the first failure of each distinct
+        message is logged (WARNING, with the traceback) — not every 2 s, so a persistent
+        fault cannot flood the log — and the message is forgotten after a successful poll
+        so a recurrence is logged again. Development mode re-raises (fail loudly) after the
+        next poll has been scheduled, so the loop still survives.
+        """
         try:
             self._main_tab.refresh()
-        except Exception:
-            pass
-        self.after(POLL_INTERVAL_MS, self._poll)
+        except Exception as e:
+            message = f"{type(e).__name__}: {e}"
+            if message != self._last_poll_error:
+                self._last_poll_error = message
+                app_logger.log(
+                    f"[ui] Main tab refresh failed: {message}\n{traceback.format_exc()}",
+                    "WARNING",
+                )
+            if self._get_settings().development_mode:
+                raise
+        else:
+            self._last_poll_error = None
+        finally:
+            self.after(POLL_INTERVAL_MS, self._poll)
 
     def on_close(self) -> None:
         self._manager.stop_all()

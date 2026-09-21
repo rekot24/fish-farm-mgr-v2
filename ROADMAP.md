@@ -218,8 +218,8 @@ changed; the per-item notes below record what was actually built and why.
 
 | Item | Outcome |
 |---|---|
-| 8-A | ✅ As specified |
-| 8-B | ✅ As specified (cache selected by a `use_cache` parameter) |
+| 8-A | ✅ As specified (persistence later reworked — see Phase 8 follow-up, F-2) |
+| 8-B | ✅ As specified (later replaced by a non-blocking background refresh — see F-3) |
 | 8-C | ✅ Built with a **different command** — the prescribed one returned nothing on every device |
 | 8-D | ✅ Built with a **different mechanism** — throttle BGR conversion, never sleep the drain thread |
 | 8-E | ✅ As specified — defensive hygiene, the described torn-read cannot occur |
@@ -267,10 +267,13 @@ result (not thread-safe). File I/O also does not belong on a hot path.
 - [x] Log INFO when a coordinate is successfully persisted; WARNING on any failure.
       No silent swallowing. Follows Layer 6 (error handling) and Layer 7 (logging).
 
-**Notes:** The lock serializes worker-vs-worker writes only. UI saves (crop tool, capture tab,
-main tab) still read-modify-write devices.json without it — see Pending fixes.
-`_tap_cache_lock` is an instance attribute (one `DeviceManager` per process). The disk write
-still happens on the worker thread, but only the first time a coordinate is discovered.
+**Notes (as first built):** The lock serialized worker-vs-worker writes only; UI saves
+still bypassed it and `persist_tap_cache` did a disk read-modify-write from a snapshot that
+could be older than memory. **Superseded in the Phase 8 follow-up (F-2):** `_tap_cache_lock`
+and the disk read are gone. `save_devices()` itself is now the single, lock-protected,
+atomic writer; `persist_tap_cache` saves the live in-memory dict (memory is the source of
+truth) and discards a coordinate whose assignment was replaced mid-discovery. The disk write
+still happens on the worker thread, only the first time a coordinate is discovered.
 
 **Files:** `bot/device_worker.py`, `bot/device_manager.py`
 
@@ -313,8 +316,11 @@ passed only by `get_all_status()` / `get_status()`; every other caller (`start_d
 boot on Windows, so `0.0` could look "fresh" right after boot). A failed `adb devices` is
 never cached, so the next poll retries. Only the status-poll path writes the cache; live
 calls do not refresh it, so a card's `adb_connected` badge can lag a real plug/unplug by up
-to 10 s. `get_all_status()` still runs the subprocess on the Tk main thread — see Pending
-fixes.
+to 10 s. **Superseded in the Phase 8 follow-up (F-3):** `get_all_status()` ran the
+subprocess on the Tk thread whenever the TTL expired, freezing the window for up to 10 s when
+adb was hung. It now never runs adb: it reads a snapshot and starts one single-flight
+background refresh when the snapshot is stale; `use_cache` is gone and `_connected_serials()`
+is live-only again.
 
 **Files:** `bot/device_manager.py`, `config/constants.py`
 
@@ -694,7 +700,9 @@ is an accepted hard requirement for this app.
       ```
       ADB return is **polled**, not a fixed second sleep (phones take ~5–15 s to re-enumerate
       and re-authorize). The rate limit (a sixth safeguard beyond the plan) stops a flapping
-      phone being power-cycled in a loop overnight.
+      phone being power-cycled in a loop overnight. **Follow-up (F-1):** the same recovery is
+      also tried when the worker's Level 3 scrcpy rebuild fails after repeated tap failures, and
+      `recover_via_usb_reset` refuses to run for a worker that is no longer running.
 - [x] Logging: WARNING when a reset is attempted, INFO when the device comes back, ERROR when
       it is still missing or the reset fails.
 - [x] Verification: mocked tests for every branch of `reset_usb_port`, `recover_via_usb_reset`
@@ -707,6 +715,117 @@ is an accepted hard requirement for this app.
 **Files:** `bot/device_manager.py`, `bot/device_worker.py`, `config/devices.py`,
 `config/constants.py`, `ui/device_settings_dialog.py`, `tools/usb_pnp.py`,
 `tools/__init__.py`, `README.md`
+
+---
+
+## Phase 8 follow-up — recovery-chain hardening ✅ Done (2026-09-20)
+
+Branch `phase-8-followup`, done before the overnight soak. Three items from the Phase 8
+check-off pass, worked one at a time with the same method: each premise checked against the
+code and real adb output before anything was changed. Investigating them turned up more than
+was asked; everything below was measured, not assumed.
+
+### F-1  `_DEVICE_NOT_FOUND` text mismatch — and two more breaks in the recovery chain
+
+**Status:** ✅ Done — three commits.
+
+- [x] **The mismatch.** With `-s <serial>` adb prints `adb.exe: device 'X' not found` (shell) /
+      `error: device 'X' not found` (get-state), never the literal `device not found` the two
+      checks in `device_worker.py` looked for. New shared helper
+      `tools/adb_errors.adb_output_means_device_gone(returncode, stderr)`; the wording lives in
+      `ADB_DEVICE_GONE_PATTERN` (`config/constants.py`). It matches **`not found` and `offline`
+      only**, requires a non-zero exit, searches stderr only (stdout is arbitrary command
+      output) and needs the `adb:` / `error:` prefix so a shell command's own stderr cannot
+      match. Verified against the live output for a phone that had dropped off ADB.
+- [x] **The premise was only partly true.** "The counter never increments on a real drop" is
+      wrong for the main path: when scrcpy's reconnect is exhausted the backend reports
+      disconnected and the worker counts without the text check. Measured with the real worker
+      loop and real adb wording (threshold 3, 6 loops):
+
+      | Backend state | Before | After |
+      |---|---|---|
+      | S1 scrcpy disconnected | counts 1,2,3 → recovery → stop | unchanged |
+      | S2 "connected", `get_frame()` None | counter stuck at 0, `launch_roblox` ×6, never stops | counts 1,2,3 → recovery, 0 relaunches |
+      | S3 stale frame, nothing matches | counter 0, `launch_roblox` ×6 | counter 0 (by decision), 0 relaunches |
+
+      A dropped phone was being read as "Roblox not running" → CRASHED → relaunch spam, and the
+      counter was reset instead of incremented.
+- [x] **Second break found: the tap-failure ladder never reached Level 3.** The soft-threshold
+      adb reconnect reset the failure counter to 0, so with the defaults (soft 5 < hard 10) the
+      counter never got past 4–5 and the scrcpy rebuild could never fire. Measured: 100
+      consecutive tap failures → `adb_reconnect` ×20, rebuild ×0, worker never stopped — a
+      phone with dead taps looped adb reconnects forever. The soft attempt no longer resets the
+      counter; the ladder (adb reconnect at 5, rebuild at 10) now repeats while failures
+      persist. **Behaviour change:** after 10 consecutive tap failures the scrcpy backend is now
+      rebuilt, as the docstring and Settings tab always described. The hard threshold is
+      checked first so `hard <= soft` cannot fire both actions on one failure.
+- [x] **Third: USB reset on rebuild failure.** With Level 3 reachable, a failed rebuild (device
+      gone from ADB) now tries USB reset recovery via the shared `_try_usb_reset_recovery`
+      before the worker stops. `recover_via_usb_reset` also refuses to run when its worker is
+      not running, so a phone the user just stopped is never power-cycled.
+- **Deliberately not changed (decisions):** a received frame still resets the ADB-failure
+      counter (S3), so a stale frame from a wedged stream is not counted — a real "not found"
+      drop also kills the scrcpy socket and takes the S1 path; `device unauthorized` /
+      `still connecting` are not "gone" (they need a person; a USB reset cannot fix them);
+      timeouts are not "gone" (a slow phone at the 3 s foreground timeout would look dead and
+      get power-cycled). Revisit if a wedged-stream case shows up in the logs.
+
+### F-2  UI saves bypassing the lock — memory is now the single source of truth
+
+**Status:** ✅ Done — two commits.
+
+- [x] **Inventory of every writer of devices.json.** `crop_tool._save`, `capture_tab`
+      assign / unassign (direct `save_devices`); `main.py`'s `save_devices_fn` (used by
+      `main_tab` ×2 and `device_tab` ×3); `DeviceManager.persist_tap_cache`. The first three
+      touch tap fields (`tap_offset_x/y`, `cached_tap_x/y`); the rest write the whole dict,
+      including coordinates workers cached. Only `persist_tap_cache` took the 8-A lock.
+- [x] **The bigger bug behind it.** `CropTool._save` edited a private `load_devices()` disk
+      snapshot and never touched the live in-memory dict (it only received `manager`; and
+      `reload_devices` is passed around but never called). Reproduced with the real `_save`:
+      after a re-crop the worker kept the old assignment (stale cached coordinate, no tap
+      override), and the next unrelated UI save (a card checkbox) wrote the stale memory back
+      over the crop on disk, silently reverting it.
+- [x] **Fix.** `save_devices()` is the only writer and takes a module-level lock itself, so no
+      caller can forget it, and writes atomically (temp file in the same directory, fsync,
+      `os.replace`; retried 20 × 50 ms on Windows `PermissionError`; a crash can no longer leave
+      a truncated file that `load_devices()` reads as "no devices"; ~4 ms per save).
+      `persist_tap_cache` saves the live dict and discards, with a WARNING, a coordinate whose
+      assignment the user replaced while the worker was discovering it. `CropTool` and
+      `CaptureTab` now take the app's `get_devices` / `save_devices_fn` (required — no silent
+      disk-only path) and edit the live dict. Checked statically: `save_devices` is called only
+      by the store itself, `main.py`'s wrapper and `persist_tap_cache`; `load_devices` only at
+      startup.
+- [x] **Also fixed on those lines:** the crop tool and `_assign_detector` built a fresh
+      `DetectorAssignment` without `always_detect`, so every re-crop or re-assign silently reset
+      it to False. It is preserved now.
+- [ ] Left alone by decision: `reload_devices` in `main.py` / `ui/app.py` is dead wiring (never
+      called). Removing it changes signatures for no fix; delete it in a cleanup pass.
+
+### F-3  ADB on the Tk thread
+
+**Status:** ✅ Done — four commits.
+
+- [x] **Exact path.** `App._poll` (every 2 s, Tk thread) → `MainTab.refresh()` →
+      `DeviceManager.get_all_status()` → `subprocess.run([adb, "devices"], timeout=10)` whenever
+      the 10 s cache had expired. Measured blocking on the calling thread: ~0.1 s healthy (real
+      adb here is ~20 ms), **2.0 s** for a slow adb, **10.0 s** for a hung one — i.e. the window
+      froze most in exactly the state a farm is in when phones drop off USB.
+- [x] **Fix.** `get_all_status` / `get_status` never run adb: they read a snapshot and, when it
+      is older than `ADB_STATUS_CACHE_TTL_S`, start ONE background refresh (single-flight lock,
+      daemon thread) and return the old snapshot at once. A failed query publishes an empty set
+      and is retried after a TTL. Until the first refresh finishes `adb_connected` is omitted
+      (the UI already defaults it to True), so there is no false "ADB Offline" flash. Tested
+      with a fake adb that hangs: 200 polls, slowest 0.5 ms, exactly one subprocess, never on
+      the caller's thread; and against the real phones.
+- [x] **Other UI-thread ADB sites found and fixed:** the End run button
+      (`manager.force_end_run` → tap, 10 s timeout) now runs on a background thread like
+      Start/Stop; the Add device scan (`adb devices`) runs on a background thread with the
+      button disabled meanwhile. Verified statically: the only `subprocess` calls in `ui/` are
+      the two thread targets. (`capture_tab` Test and `crop_tool._capture` were already
+      threaded.)
+- [x] **`App._poll` no longer swallows errors** (`except Exception: pass`): the first failure of
+      each distinct message is logged at WARNING with its traceback (not every 2 s), the loop
+      always reschedules, and `development_mode` re-raises.
 
 ---
 
@@ -726,6 +845,12 @@ is an accepted hard requirement for this app.
 - With `suppress_launcher_console` on (the default), a crash before logging is configured (e.g. a
   bad import at startup) is invisible in the hidden console. Untick the setting or run
   `python main.py --no-elevate` from a terminal to see it.
+- The follow-up changes are verified with mocks, simulations of the real worker loop, real adb
+  output and real PowerShell — but not yet by a long soak on the farm. In particular the tap-failure
+  ladder now really rebuilds scrcpy after 10 consecutive failed taps (F-1), which has never run
+  on hardware before, and the automatic USB-reset path is still only exercised with mocks.
+- A stale frame still resets the ADB-failure counter (F-1, S3 — decided). If a wedged stream
+  ever shows a phone that is gone from ADB while frames stop arriving, that case is not counted.
 
 ---
 
@@ -736,7 +861,7 @@ is an accepted hard requirement for this app.
       True. Fix: add timeout in resync() — if pending == "Starting…" and not running and
       time since pending > ~10s, clear pending and re-enable button.
 
-- [ ] `_DEVICE_NOT_FOUND` never fires — text mismatch. `_check_roblox_foreground` and
+- [x] **Resolved in the Phase 8 follow-up (F-1).** `_DEVICE_NOT_FOUND` never fires — text mismatch. `_check_roblox_foreground` and
       `_check_roblox_running` (device_worker.py) detect a dropped device by looking for the
       literal string "device not found" in adb's output. With `-s <serial>` adb actually
       prints `adb.exe: device 'SERIAL' not found` (verified with an unknown serial on
@@ -750,6 +875,7 @@ is an accepted hard requirement for this app.
       failure — it is not matched today either. Check the same assumption in
       `bot/actions.py` and the capture backends. Fixing this also widens the set of failure shapes
       that reach the ADB-failure counter which triggers USB reset recovery (8-H).
+      *Resolved: see F-1 — `tools/adb_errors.py`, `not found` + `offline`.*
 
 - [ ] `replace_capture_backend` clears the wrong attribute — `DeviceWorker.replace_capture_backend`
       sets `self._latest_frame = None`, but the worker reads `self._last_frame`, so the previous
@@ -758,15 +884,21 @@ is an accepted hard requirement for this app.
       during Phase 8-A. Fix: clear `_last_frame` (that attribute is never `_latest_frame` on the
       worker).
 
-- [ ] UI saves are not serialized with the worker's tap-cache writes — the crop tool, capture tab and
+- [x] **Resolved in the Phase 8 follow-up (F-2).** UI saves are not serialized with the worker's tap-cache writes — the crop tool, capture tab and
       main tab read-modify-write devices.json without `DeviceManager._tap_cache_lock` (added in 8-A,
       which only serializes worker-vs-worker writes). Rare: it needs a UI save at the same moment as a
       first-time tap-coordinate discovery. Fix: route every devices.json write through one locked save
       path.
+      *Resolved: see F-2 — one atomic, lock-protected writer; the crop tool's stale-memory overwrite was the bigger bug.*
 
-- [ ] `DeviceManager.get_all_status()` runs `adb devices` (10 s timeout) on the Tk main thread. 8-B made
+- [x] **Resolved in the Phase 8 follow-up (F-3).** `DeviceManager.get_all_status()` runs `adb devices` (10 s timeout) on the Tk main thread. 8-B made
       it ~5× less frequent (10 s TTL), but a hung `adb` can still freeze the window for up to 10 s.
       Fix: refresh the ADB cache on a background thread and let the UI poll read only the cached value.
+      *Resolved: see F-3 (plus the End run button and Add device scan, which had the same problem).*
+
+- [ ] Dead wiring: `reload_devices` (`main.py`, `ui/app.py`) is passed around but never called. With
+      memory as the source of truth (F-2) there is nothing to reload. Delete it and its parameter in a
+      cleanup pass.
 
 ---
 

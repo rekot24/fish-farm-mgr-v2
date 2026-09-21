@@ -60,7 +60,7 @@ class Settings:
     lobby_stuck_threshold_s: float   = LOBBY_STUCK_THRESHOLD_S
     unknown_stuck_threshold_s: float = 60.0
     loop_interval_s: float           = LOOP_INTERVAL_S
-    adb_failure_threshold: int       = 3    # consecutive "device not found" before worker stops
+    adb_failure_threshold: int       = 3    # consecutive "device gone" (not found / offline) before recovery / worker stop
     tap_failure_threshold: int       = 5    # consecutive tap failures before adb reconnect
     tap_failure_hard_threshold: int  = 10   # consecutive tap failures before scrcpy rebuild
     start_timeout_s: float           = 10.0 # seconds before "Starting…" card shows Start failed

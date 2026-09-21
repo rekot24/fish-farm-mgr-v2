@@ -3,20 +3,36 @@ config/devices.py
 
 Per-device configuration schema, loader, and saver.
 Each device has its own DeviceConfig stored in config/devices.json.
+
+Persistence model: the live in-memory dict (owned by main.py, shared by the UI, the
+manager and every worker) is the SOURCE OF TRUTH; devices.json is its mirror. Every
+writer edits that dict and calls save_devices() with it — nobody edits a private disk
+snapshot, which would leave memory stale and let the next save overwrite the change.
+save_devices() is the only function that writes the file, and it is thread-safe.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import threading
+import time
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 from config.paths import devices_path
 from config.constants import (
     AUTO_FARM_INTERVAL_S,
+    DEVICES_SAVE_RETRIES,
+    DEVICES_SAVE_RETRY_DELAY_S,
+    DEVICES_TMP_SUFFIX,
     END_RUN_INTERVAL_S,
     STAY_AWAKE_INTERVAL_S,
 )
+
+# Serializes every write of devices.json (UI threads and worker threads alike). Plain
+# Lock: save_devices() does not nest.
+_DEVICES_FILE_LOCK = threading.Lock()
 
 
 @dataclass
@@ -129,8 +145,37 @@ def load_devices() -> dict[str, DeviceConfig]:
 
 
 def save_devices(devices: dict[str, DeviceConfig]) -> None:
+    """
+    Write every device config to devices.json. Safe to call from any thread.
+
+    Callers pass the LIVE in-memory dict (memory is the source of truth, the file is its
+    mirror). Writers are serialized by _DEVICES_FILE_LOCK, and the write is atomic —
+    temp file in the same directory, fsync, os.replace — so a crash or a concurrent
+    reader never sees a truncated file (load_devices() would read that as "no devices").
+    On Windows os.replace raises PermissionError while another process has the file open
+    (editor, antivirus, backup), so it is retried briefly, then the error is raised.
+    """
     path = devices_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    output = {serial: asdict(cfg) for serial, cfg in devices.items()}
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(output, f, indent=2)
+    tmp_path = path.with_name(path.name + DEVICES_TMP_SUFFIX)
+    with _DEVICES_FILE_LOCK:
+        output = {serial: asdict(cfg) for serial, cfg in devices.items()}
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(output, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            for attempt in range(DEVICES_SAVE_RETRIES):
+                try:
+                    os.replace(tmp_path, path)
+                    break
+                except PermissionError:
+                    if attempt == DEVICES_SAVE_RETRIES - 1:
+                        raise
+                    time.sleep(DEVICES_SAVE_RETRY_DELAY_S)
+        finally:
+            # Only still exists if the swap never happened (write or replace failed).
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass

@@ -576,7 +576,16 @@ class DeviceCard(ttk.Frame):
             ).start()
 
     def _fire_end_run(self) -> None:
-        self._manager.force_end_run(self._serial)
+        """
+        Force an end-run tap now. The tap is an ADB call (up to its 10 s timeout), so it
+        runs on a background thread — the Tk thread must never wait on ADB. Same pattern
+        as the Start / Stop buttons.
+        """
+        threading.Thread(
+            target=self._manager.force_end_run,
+            args=(self._serial,),
+            daemon=True,
+        ).start()
 
     def _open_settings(self) -> None:
         from ui.device_settings_dialog import DeviceSettingsDialog
