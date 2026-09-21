@@ -163,6 +163,30 @@ Per-device intervals (auto-farm, end-run, stay-awake) are configured in each dev
 
 Go to the **Main** tab and click **Start all**, or start individual devices with their **Start** button. Workers begin detecting state and acting immediately.
 
+### 6 — Optional: USB port reset recovery (Windows)
+
+If a phone drops off ADB and normal recovery fails, the app can power-cycle that phone's USB
+device (a software unplug/replug) instead of stopping its worker and waiting for you.
+
+1. Run the app as administrator (it asks via UAC at startup — see [Running](#running)).
+2. With the phone plugged in, click **Settings** on its Main-tab card, then in **USB port reset
+   (Windows)** click **Detect** and **Save**. That fills **PnP Instance ID (USB reset)**. Leave it
+   blank to skip USB reset for that phone.
+3. That's all. When a worker reaches its ADB failure threshold, the app power-cycles the phone,
+   waits up to 20 s for ADB to see it again, rebuilds the capture stream, and the worker carries
+   on. If that fails — or that phone was already reset in the last 10 minutes — the worker stops
+   as before. Each step is logged (WARNING when a reset is attempted, INFO if the phone comes
+   back, ERROR if it does not).
+
+To test a phone by hand, from an **elevated** PowerShell in the repo root:
+
+```powershell
+python -m tools.usb_pnp detect <adb_serial>   # look up its PnP Instance ID (no admin needed)
+python -m tools.usb_pnp reset  <adb_serial>   # power-cycle it and wait for ADB to return
+```
+
+Not available on Linux: use `uhubctl` at the host instead (see [ROADMAP.md](ROADMAP.md)).
+
 ---
 
 ## How the loop works
