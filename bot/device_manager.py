@@ -17,6 +17,10 @@ ADB behavior:
   - A device must be present in `adb devices` before scrcpy startup begins.
   - Status snapshots include adb_connected so the UI can distinguish a normal
     stopped card from a phone whose USB/ADB transport has dropped.
+  - The status-poll path (get_all_status / get_status) reuses the last
+    `adb devices` result for ADB_STATUS_CACHE_TTL_S so the 2s UI poll does not
+    spawn a subprocess every time. start_device / _rebuild_backend /
+    discover_devices always query live — they need a current answer.
 
 Tap-coordinate cache persistence:
   - Workers never touch devices.json directly. When a worker discovers a new
@@ -33,11 +37,13 @@ from __future__ import annotations
 
 import subprocess
 import threading
+import time
 from typing import Callable
 
 from bot import app_logger
 from bot.device_worker import DeviceWorker
 from capture.scrcpy_socket import ScrcpySocketBackend
+from config.constants import ADB_STATUS_CACHE_TTL_S
 from config.devices import DeviceConfig, load_devices, save_devices
 from config.paths import project_root, adb_exe
 from config.settings import Settings
@@ -60,6 +66,12 @@ class DeviceManager:
         # (see persist_tap_cache). Without it two workers saving at once
         # would silently overwrite each other's cached coordinate.
         self._tap_cache_lock = threading.Lock()
+        # Last successful `adb devices` result for the status-poll path. Written
+        # and read only from the UI thread (get_all_status / get_status), so no
+        # lock. -inf (not 0.0) so the first poll always queries live — monotonic()
+        # counts from boot on Windows and could otherwise look "fresh" right after boot.
+        self._adb_connected_cache: set[str] = set()
+        self._adb_cache_updated_at: float = float("-inf")
 
     def persist_tap_cache(self, serial: str, detector_key: str, x: int, y: int) -> None:
         """
@@ -103,8 +115,28 @@ class DeviceManager:
                     "WARNING",
                 )
 
-    def _connected_serials(self, log_result: bool = False) -> set[str]:
-        """Return serials currently reported by bundled `adb devices`."""
+    def _connected_serials(
+        self, log_result: bool = False, use_cache: bool = False
+    ) -> set[str]:
+        """
+        Return serials currently reported by bundled `adb devices`.
+
+        Args:
+            log_result : log the discovered serials at INFO (live queries only)
+            use_cache  : status-poll path only. Return the last successful result
+                         if it is younger than ADB_STATUS_CACHE_TTL_S; otherwise
+                         query live and refresh the cache. Default False = always
+                         query live and leave the cache untouched, which is what
+                         start_device / _rebuild_backend / discover_devices need.
+
+        Returns:
+            Set of serials in the "device" state. Empty set if the query fails;
+            a failed query is never cached, so the next poll retries.
+        """
+        if use_cache and (
+            time.monotonic() - self._adb_cache_updated_at < ADB_STATUS_CACHE_TTL_S
+        ):
+            return self._adb_connected_cache
         try:
             result = subprocess.run(
                 [adb_exe(), "devices"],
@@ -122,6 +154,9 @@ class DeviceManager:
                     f"[manager] Discovered {len(serials)} device(s): {sorted(serials)}",
                     "INFO",
                 )
+            if use_cache:
+                self._adb_connected_cache = serials
+                self._adb_cache_updated_at = time.monotonic()
             return serials
         except Exception as e:
             app_logger.log(f"[manager] discover_devices error: {e}", "ERROR")
@@ -297,7 +332,7 @@ class DeviceManager:
     def get_all_status(self) -> list[dict]:
         """Return a status snapshot for every registered device."""
         devices = self._get_devices()
-        connected_serials = self._connected_serials()
+        connected_serials = self._connected_serials(use_cache=True)
         result = []
         for serial, cfg in devices.items():
             worker = self._workers.get(serial)
@@ -323,7 +358,7 @@ class DeviceManager:
         return result
 
     def get_status(self, serial: str) -> dict | None:
-        adb_connected = serial in self._connected_serials()
+        adb_connected = serial in self._connected_serials(use_cache=True)
         worker = self._workers.get(serial)
         if worker:
             status = worker.get_status()

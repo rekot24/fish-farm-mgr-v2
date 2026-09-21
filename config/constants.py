@@ -90,6 +90,12 @@ ADB_DEFAULT_TIMEOUT_S = 10.0
 # Screencap can take 300-500ms on slower devices; 15s is a generous ceiling.
 ADB_SCREENCAP_TIMEOUT_S = 15.0
 
+# [TUNABLE] How long to reuse the last 'adb devices' result before re-querying (seconds).
+# Trades freshness for reduced subprocess spawning during the UI poll loop
+# (the Main tab polls every ~2s; uncached that is ~43,000 spawns per day).
+# Only the status-poll path uses this; start/rebuild always query live.
+ADB_STATUS_CACHE_TTL_S: float = 10.0
+
 # [INTERNAL] Max 32-bit integer — used as "never timeout" for ADB screen_off_timeout.
 MAX_INT32 = 2_147_483_647
 
