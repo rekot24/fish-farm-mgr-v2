@@ -202,7 +202,7 @@ Completed in session — all items shipped.
 
 ---
 
-## Phase 8 — Long-run stability fixes (next)
+## Phase 8 — Long-run stability fixes ✅ Done (2026-09-20)
 
 Root cause audit identified issues causing overnight degradation — app needs a reboot
 after ~12–18 hours of continuous operation. All items below address confirmed findings.
@@ -211,9 +211,27 @@ Fix in order listed; each is independent but together they eliminate the overnig
 All fixes must follow dev-standards app-framework.md. Specific compliance requirements
 are called out per item below.
 
+**Outcome (2026-09-20, branch `phase-8-long-run-stability`).** Each item was checked against
+the code — and where a command or behaviour was involved, against real devices — before
+implementing. Four of the eight roadmap prescriptions were wrong or unnecessary and were
+changed; the per-item notes below record what was actually built and why.
+
+| Item | Outcome |
+|---|---|
+| 8-A | ✅ As specified |
+| 8-B | ✅ As specified (cache selected by a `use_cache` parameter) |
+| 8-C | ✅ Built with a **different command** — the prescribed one returned nothing on every device |
+| 8-D | ✅ Built with a **different mechanism** — throttle BGR conversion, never sleep the drain thread |
+| 8-E | ✅ As specified — defensive hygiene, the described torn-read cannot occur |
+| 8-F | ⛔ **No code change** — the prescribed join would raise `RuntimeError` and break reconnect |
+| 8-G | ⛔ **No code change** — attribute already initialized in the base class |
+| 8-H | ✅ Both parts built; USB reset **wired at the worker's ADB-failure threshold**, not `_rebuild_backend` |
+
 ---
 
 ### 8-A  Coordinate cache — thread-safe write, no disk I/O in worker loop
+
+**Status:** ✅ Done 2026-09-20.
 
 **Problem:** `_resolve_tap_coords` in `device_worker.py` calls `load_devices()` and
 `save_devices()` directly from inside the worker loop every time a new tap coordinate
@@ -222,9 +240,9 @@ result (not thread-safe). File I/O also does not belong on a hot path.
 
 **Fix:**
 
-- [ ] Add `_tap_cache_lock: threading.Lock` to `DeviceManager.__init__`. This is a
+- [x] Add `_tap_cache_lock: threading.Lock` to `DeviceManager.__init__`. This is a
       module-level concern — one lock guards all workers' writes to devices.json.
-- [ ] Add a `persist_tap_cache` method to `DeviceManager` with this exact signature:
+- [x] Add a `persist_tap_cache` method to `DeviceManager` with this exact signature:
       ```python
       def persist_tap_cache(self, serial: str, detector_key: str, x: int, y: int) -> None:
           """
@@ -236,24 +254,31 @@ result (not thread-safe). File I/O also does not belong on a hot path.
           """
       ```
       Define the interface (signature + docstring) before implementing.
-- [ ] Pass `persist_tap_cache` into `DeviceWorker.__init__` as a `Callable` callback,
+- [x] Pass `persist_tap_cache` into `DeviceWorker.__init__` as a `Callable` callback,
       named `persist_tap_cache_fn`. Store as `self._persist_tap_cache`. Same pattern
       as the existing `get_settings` and `get_device_cfg` callbacks.
-- [ ] In `_resolve_tap_coords`, mutate `assignment.cached_tap_x/y` immediately on the
+- [x] In `_resolve_tap_coords`, mutate `assignment.cached_tap_x/y` immediately on the
       in-memory cfg object (no lock needed — only this worker owns this cfg). Then call
       `self._persist_tap_cache(self._serial, detector_key, x, y)` for the disk write.
       Remove the inline `load_devices` / `save_devices` block entirely.
-- [ ] Inside `persist_tap_cache`: defensively handle `all_devices.get(serial)` returning
+- [x] Inside `persist_tap_cache`: defensively handle `all_devices.get(serial)` returning
       None (device removed while running) — log WARNING and return without writing.
       Handle save failure with try/except — log WARNING, do not raise.
-- [ ] Log INFO when a coordinate is successfully persisted; WARNING on any failure.
+- [x] Log INFO when a coordinate is successfully persisted; WARNING on any failure.
       No silent swallowing. Follows Layer 6 (error handling) and Layer 7 (logging).
+
+**Notes:** The lock serializes worker-vs-worker writes only. UI saves (crop tool, capture tab,
+main tab) still read-modify-write devices.json without it — see Pending fixes.
+`_tap_cache_lock` is an instance attribute (one `DeviceManager` per process). The disk write
+still happens on the worker thread, but only the first time a coordinate is discovered.
 
 **Files:** `bot/device_worker.py`, `bot/device_manager.py`
 
 ---
 
 ### 8-B  ADB devices subprocess — cache the poll result, don't spawn per-poll
+
+**Status:** ✅ Done 2026-09-20.
 
 **Problem:** `DeviceManager.get_all_status()` calls `_connected_serials()` on every
 invocation, which spawns `subprocess.run([adb, "devices"])`. The UI polls every
@@ -262,7 +287,7 @@ CPU bleed.
 
 **Fix:**
 
-- [ ] Add the following named constant to `config/constants.py`, tagged `[TUNABLE]`
+- [x] Add the following named constant to `config/constants.py`, tagged `[TUNABLE]`
       with a comment explaining it:
       ```python
       ADB_STATUS_CACHE_TTL_S: float = 10.0  # [TUNABLE] How long to reuse the last
@@ -270,16 +295,26 @@ CPU bleed.
                                               # Trades freshness for reduced subprocess
                                               # spawning during the UI poll loop.
       ```
-- [ ] Add `_adb_connected_cache: set[str]` and `_adb_cache_updated_at: float = 0.0`
+- [x] Add `_adb_connected_cache: set[str]` and `_adb_cache_updated_at: float = 0.0`
       to `DeviceManager.__init__`.
-- [ ] In `_connected_serials()`, return the cached set when
+- [x] In `_connected_serials()`, return the cached set when
       `time.monotonic() - self._adb_cache_updated_at < ADB_STATUS_CACHE_TTL_S`.
       Refresh and update `_adb_cache_updated_at` only when the TTL has elapsed.
-- [ ] `start_device()` and `_rebuild_backend()` bypass the cache and always call
+- [x] `start_device()` and `_rebuild_backend()` bypass the cache and always call
       `subprocess.run` directly — those paths need a live answer.
       Only the status-poll path in `get_all_status()` / `get_status()` uses the cache.
-- [ ] Import `ADB_STATUS_CACHE_TTL_S` from `config/constants.py` — not hardcoded
+- [x] Import `ADB_STATUS_CACHE_TTL_S` from `config/constants.py` — not hardcoded
       on the class. No magic numbers (Layer 13, CLAUDE.md instruction 5).
+
+**As built:** `_connected_serials(log_result=False, use_cache=False)` — `use_cache=True` is
+passed only by `get_all_status()` / `get_status()`; every other caller (`start_device`,
+`_rebuild_backend`, `discover_devices`, the USB-reset ADB poll) stays live by default.
+`_adb_cache_updated_at` starts at `float("-inf")`, not `0.0` (`time.monotonic()` counts from
+boot on Windows, so `0.0` could look "fresh" right after boot). A failed `adb devices` is
+never cached, so the next poll retries. Only the status-poll path writes the cache; live
+calls do not refresh it, so a card's `adb_connected` badge can lag a real plug/unplug by up
+to 10 s. `get_all_status()` still runs the subprocess on the Tk main thread — see Pending
+fixes.
 
 **Files:** `bot/device_manager.py`, `config/constants.py`
 
@@ -287,39 +322,56 @@ CPU bleed.
 
 ### 8-C  Foreground check — replace heavy dumpsys command with lightweight equivalent
 
+**Status:** ✅ Done 2026-09-20 — built with a corrected command (the originally prescribed one does not work; see below).
+
 **Problem:** `_check_roblox_foreground()` in `device_worker.py` runs
 `dumpsys activity activities`, which dumps the entire Android activity stack. This is
 one of the heaviest ADB shell commands available. It runs every time `get_frame()`
 returns None — exactly when the system is already under stress.
 
-**Fix:**
+**Fix (as built):**
 
-- [ ] Add the following named constant to `config/constants.py`, tagged `[TUNABLE]`:
-      ```python
-      ADB_FOREGROUND_CHECK_TIMEOUT_S: float = 3.0  # [TUNABLE] Timeout for the
-                                                     # lightweight foreground check.
-                                                     # Lower than the old 8s because
-                                                     # the new command output is ~1 line.
+- [x] `ADB_FOREGROUND_CHECK_TIMEOUT_S: float = 3.0` in `config/constants.py`, `[TUNABLE]`
+      (was 8.0 s inline).
+- [x] `ADB_FOREGROUND_CHECK_SHELL_CMD` in `config/constants.py`, `[INTERNAL]`:
       ```
-- [ ] Replace the `dumpsys activity activities` call with:
+      dumpsys window displays | grep -E 'mCurrentFocus|mFocusedApp'
       ```
-      adb shell "dumpsys window windows | grep -m1 -E 'mCurrentFocus|mFocusedApp'"
-      ```
-      This returns a single matching line — ~10× less output, significantly faster.
-- [ ] Add a comment at the call site explaining the choice:
-      ```python
-      # Lightweight foreground check — single grep line instead of full activity stack.
-      # 'dumpsys activity activities' was the previous command; it is too heavy to run
-      # on every None-frame cycle. This produces the same result from one output line.
-      ```
-- [ ] Update the subprocess timeout from 8.0 s to `ADB_FOREGROUND_CHECK_TIMEOUT_S`.
-- [ ] Parse the result the same way — check for `com.roblox.client` in the output line.
+      Run as `adb -s <serial> shell "<cmd>"`. The grep runs on the phone, so only the ~2–4
+      matching focus lines (~200 B) cross USB instead of 26–75 KB of activity stack. The
+      constant's comment records why it is `displays` and has no `-m1`.
+- [x] Call-site comment in `_check_roblox_foreground` explaining the choice, plus a
+      docstring.
+- [x] Subprocess timeout is `ADB_FOREGROUND_CHECK_TIMEOUT_S`.
+- [x] Parsing: Roblox counts as foreground if **any** returned line contains
+      `com.roblox.client` (multi-display devices emit several lines, some `=null`). No
+      lines → "Could not determine foreground app" → False. The device-not-found check is
+      unchanged (see the `_DEVICE_NOT_FOUND` item in Pending fixes).
+
+**Why not the originally prescribed command.** The roadmap said
+`dumpsys window windows | grep -m1 -E 'mCurrentFocus|mFocusedApp'`. Probed on 8 real
+devices (Pixel 6 Pro, Pixel 8a, six Samsungs; Android 12–17):
+- `dumpsys window windows` does not contain the `mCurrentFocus`/`mFocusedApp` lines at all —
+  0 of 8 devices detected the foreground. The worker would have concluded "Roblox not
+  foreground" on every None-frame / no-detector-match cycle and relaunched it in a loop.
+- `grep -m1` returns `mCurrentFocus=null` first on Android 16/17 (a second display), ahead of
+  the real Roblox line.
+- Wall time is unchanged (~0.1 s either way; the old command was already fast). The gain is
+  ~99 % fewer bytes over USB, not speed.
+- The check also runs from `_resolve_state` whenever no detector matches, not only when
+  `get_frame()` returns None, so it fires more often than the problem statement says.
+
+Verified: the real method returned True on all online devices, and the parser handled
+Roblox-only, null-first, other-app-focused, only-null, empty, timeout and device-not-found
+output (stubbed). A genuine "Roblox in the background" case was not reproduced on hardware.
 
 **Files:** `bot/device_worker.py`, `config/constants.py`
 
 ---
 
 ### 8-D  Decode thread frame-rate governor — stop pegging CPU 24/7
+
+**Status:** ✅ Done 2026-09-20 — built with a different mechanism than originally planned (see the note below).
 
 **Problem:** `_decode_loop` in `scrcpy_socket.py` runs as a tight loop consuming H.264
 frames at the encoder's full output rate (~30–60 fps). The worker reads `_latest_frame`
@@ -328,7 +380,7 @@ produces. With 5 devices this keeps multiple CPU cores at high utilization conti
 
 **Fix:**
 
-- [ ] Add the following named constant to `config/constants.py`, tagged `[TUNABLE]`:
+- [x] Add the following named constant to `config/constants.py`, tagged `[TUNABLE]`:
       ```python
       SCRCPY_DECODE_FRAME_INTERVAL_S: float = 1.0  # [TUNABLE] Minimum time between
                                                      # BGR conversions of decoded
@@ -340,7 +392,7 @@ produces. With 5 devices this keeps multiple CPU cores at high utilization conti
                                                      # detection loop. Reduce if
                                                      # faster detection is needed.
       ```
-- **Implemented differently from the original plan (2026-09-20).** The original
+- [x] **Implemented differently from the original plan (2026-09-20).** The original
       design slept for the interval at the end of `_store_frames`. That runs on the
       same thread that drains the scrcpy socket, so it would have consumed ~1 packet/s
       against an encoder producing 10–60/s, letting the backlog grow and
@@ -351,7 +403,15 @@ produces. With 5 devices this keeps multiple CPU cores at high utilization conti
       initialized to `-inf` and reset in `_reset_decoder_state`, so the first frame after
       any (re)connect is stored immediately; it advances only after a successful
       conversion. No `_stop_event.wait` is needed because nothing blocks.
-- [ ] Import `SCRCPY_DECODE_FRAME_INTERVAL_S` from `config/constants.py` in
+      (`_attempt_reconnect` re-initializes its decoder fields itself rather than calling
+      `_reset_decoder_state`, so `_last_store_at` is not reset there — harmless, a reconnect
+      always takes longer than the interval.)
+- **Measured (offline, synthetic mostly-static H.264 at native phone resolution):** decode-
+      thread busy time per packet fell from ~8.2 → 1.1 ms (1080×2340) and 9.1 → 1.4 ms
+      (1440×3120), roughly 85 % less, with every packet still decoded. Not measured on a live
+      scrcpy session. Assumes scrcpy re-sends an unchanged screen about every 100 ms, so a
+      skipped frame is replaced almost immediately (believed, not confirmed on-device).
+- [x] Import `SCRCPY_DECODE_FRAME_INTERVAL_S` from `config/constants.py` in
       `capture/scrcpy_socket.py`. No magic numbers (Layer 13, CLAUDE.md instruction 5).
 
 **Files:** `capture/scrcpy_socket.py`, `config/constants.py`
@@ -359,6 +419,8 @@ produces. With 5 devices this keeps multiple CPU cores at high utilization conti
 ---
 
 ### 8-E  Latest-frame lock — protect numpy array swap during YUV conversion
+
+**Status:** ✅ Done 2026-09-20 — as specified, but as defensive hygiene: the described torn read cannot occur.
 
 **Problem:** `_latest_frame` is written by the decode thread and read by the worker
 thread without synchronization. CPython's GIL makes the pointer assignment atomic, but
@@ -369,12 +431,12 @@ constructed array.
 
 **Fix:**
 
-- [ ] Add `self._frame_lock: threading.Lock = threading.Lock()` to
+- [x] Add `self._frame_lock: threading.Lock = threading.Lock()` to
       `ScrcpySocketBackend.__init__`. Use `threading.Lock()` (not `RLock`) — these two
       code paths (`_store_frames` and `get_frame`) are always called from different
       threads, never re-entrantly from the same thread. RLock here would mask a future
       deadlock bug.
-- [ ] In `_store_frames`, wrap only the assignment:
+- [x] In `_store_frames`, wrap only the assignment:
       ```python
       with self._frame_lock:
           self._latest_frame = bgr_frame
@@ -382,23 +444,34 @@ constructed array.
       Do not hold the lock during `_frame_to_bgr` conversion — conversion is the slow
       part and holding the lock there would block the worker from reading the last
       good frame during it.
-- [ ] In `get_frame()`:
+- [x] In `get_frame()`:
       ```python
       with self._frame_lock:
           return self._latest_frame
       ```
-- [ ] The lock is held only for the assignment and read, never during conversion.
+- [x] The lock is held only for the assignment and read, never during conversion.
       Contention is microseconds. Add a brief comment at the lock declaration:
       ```python
       # Guards _latest_frame swap between decode thread (_store_frames) and
       # worker thread (get_frame). Held only for assignment/read, not conversion.
       ```
 
+**Notes:** `self._latest_frame = self._frame_to_bgr(frame)` builds the complete BGR array
+before the single reference rebind, and a published array is never mutated afterwards (verified
+across both the FFmpeg `bgr24` and `_opencv_yuv_to_bgr` paths: 79 published arrays, all distinct
+objects, none changed after publishing). So the "partially constructed array" in the problem
+statement was not possible under the GIL; the lock makes the hand-off explicit. **Beyond the
+spec:** the two reset-to-`None` writes (`_reset_decoder_state`, `_attempt_reconnect` on recovery
+exhausted) also take the lock, so "guards `_latest_frame`" is true for every access. The lock is
+never held during conversion.
+
 **Files:** `capture/scrcpy_socket.py`
 
 ---
 
 ### 8-F  Reconnect decode thread — join old thread before starting new one
+
+**Status:** ⛔ Resolved without a code change (2026-09-20) — the prescribed join was not added; see the resolution note at the end of this item.
 
 **Problem:** `_attempt_reconnect` in `scrcpy_socket.py` starts a new `_decode_loop`
 thread without waiting for the old one to finish. If the old thread is still winding
@@ -408,7 +481,7 @@ socket handles.
 
 **Fix:**
 
-- [ ] At the top of `_attempt_reconnect`, after `_reset_transport_for_retry()` and
+- ⛔ **Not implemented** (would raise `RuntimeError` — see resolution) — At the top of `_attempt_reconnect`, after `_reset_transport_for_retry()` and
       before any reconnect loop logic, add an explicit join on the old decode thread:
       ```python
       if self._decode_thread and self._decode_thread.is_alive():
@@ -427,10 +500,10 @@ socket handles.
       ```
       Log at WARNING when the thread is still alive (unexpected); proceed regardless
       after the timeout rather than blocking indefinitely (Layer 11 — defensive).
-- [ ] Verify `disconnect()` also joins before clearing `_decode_thread`. The join must
+- [x] Verify `disconnect()` also joins before clearing `_decode_thread`. The join must
       execute before `_reset_decoder_state()` is called. If it already does, note it
       confirmed; if not, add the same join pattern there too.
-- [ ] Reuse the existing `SCRCPY_DECODE_THREAD_JOIN_TIMEOUT_S` constant from
+- ⛔ N/A (no join was added) — Reuse the existing `SCRCPY_DECODE_THREAD_JOIN_TIMEOUT_S` constant from
       `config/constants.py` for the join timeout — already defined, do not create a
       duplicate.
 - **Resolved without a code change (2026-09-20) — the join was NOT added.**
@@ -462,6 +535,8 @@ socket handles.
 
 ### 8-G  `_reconnecting` attribute — initialize in `__init__`
 
+**Status:** ⛔ Resolved without a code change (2026-09-20) — the attribute is already initialized; see the resolution note below.
+
 **Problem:** `_reconnecting` is assigned only inside `_attempt_reconnect`
 (`self._reconnecting = True`). The `is_reconnecting` property on `capture/base.py`
 reads this attribute. If checked before `_attempt_reconnect` has ever been called,
@@ -469,15 +544,15 @@ Python raises `AttributeError` because the attribute does not yet exist.
 
 **Fix:**
 
-- [ ] Add `self._reconnecting: bool = False` to `ScrcpySocketBackend.__init__`,
+- ⛔ **Not implemented** (already initialized in `CaptureBackend.__init__`) — Add `self._reconnecting: bool = False` to `ScrcpySocketBackend.__init__`,
       alongside the other state flags (`_connected`, `_stop_event`, etc.).
-- [ ] Add a one-line docstring comment at the declaration:
+- ⛔ N/A (no declaration added) — Add a one-line docstring comment at the declaration:
       ```python
       self._reconnecting: bool = False  # True while _attempt_reconnect is active
       ```
       Follows Layer 8 (commenting standard) — state flags that aren't obvious from
       the name get a short explanation.
-- [ ] No other changes needed — the `finally: self._reconnecting = False` in
+- [x] No other changes needed — the `finally: self._reconnecting = False` in
       `_attempt_reconnect` already handles the reset correctly.
 - **Resolved without a code change (2026-09-20) — the attribute was NOT re-declared.**
       `_reconnecting` is already initialized: `CaptureBackend.__init__` (capture/base.py:42)
@@ -495,6 +570,8 @@ Python raises `AttributeError` because the attribute does not yet exist.
 
 ### 8-H  USB port reset — Windows (PowerShell PnP) + admin elevation, Linux (uhubctl) roadmap
 
+**Status:** ✅ Done 2026-09-20 — both parts built and manually verified on hardware (UAC relaunch; `tools.usb_pnp detect`/`reset` power-cycling a dropped phone). Several details differ from the original plan because they were tested against real devices; the sections below describe what was built.
+
 **What was already ruled out and why:**
 - `pyusb dev.reset()` — tested and rejected. Sends a USB reset signal but Windows does
   not fully re-enumerate the device afterward. Does not replicate a physical replug.
@@ -507,7 +584,9 @@ Python raises `AttributeError` because the attribute does not yet exist.
   PowerShell cmdlets are built into Windows with no extra binary to ship — devcon should
   not be implemented unless PowerShell testing fails.
 - The scrcpy-layer recovery (pkill scrcpy-server + adb forward --remove-all + retry)
-  is already Level 2. USB reset is Level 3 — only attempted after Level 2 also fails.
+  is already Level 2. USB reset is the last step (called "Level 4" in the code, since the
+  worker's tap-failure ladder already uses Level 1 and Level 3) — only attempted after the
+  scrcpy layer has failed and the worker has hit its ADB failure threshold.
 
 **Problem:** When a device goes ADB Offline and scrcpy-layer recovery fails, the only
 remaining automated option is a USB port power cycle. PowerShell `Disable-PnpDevice` /
@@ -517,151 +596,117 @@ elevation. The app does not currently run elevated. Recovery is a core requireme
 optional — without it the farm stops and requires manual intervention. Admin elevation
 is an accepted hard requirement for this app.
 
-**Part 1 — Admin self-elevation in `main.py`**
+**Part 1 — Admin self-elevation in `main.py` (as built)**
 
-- [ ] Add `_ensure_admin()` to `main.py`, called at the very top of the file before
-      any other initialization. Gate it behind `platform.system() == "Windows"` so the
-      Linux deployment is unaffected:
-      ```python
-      import ctypes
-      import sys
-      import platform
+- [x] `_ensure_admin() -> str` in `main.py`, called before the remaining project imports so an
+      unelevated process exits before doing any other initialization. Windows only (the
+      `platform.system()` guard is inside the function); skipped with `--no-elevate`.
+      Already admin → nothing. Otherwise relaunches with the `runas` verb via `ShellExecuteW`
+      and `sys.exit(0)`. It **returns a status** (`ELEVATION_STATUS_*` in constants) that
+      `main()` logs once the logger is configured, since nothing can be logged at the top of the
+      file: INFO when elevated, WARNING whenever the app runs unelevated on Windows.
+- [x] Differences from the original snippet: a **declined or failed UAC prompt keeps the app
+      running** unelevated (`ShellExecuteW` returns ≤ 32 on failure) instead of exiting
+      silently; the script path is absolute and the cwd is passed explicitly; arguments use
+      `subprocess.list2cmdline` (the naive quote-join misparses trailing backslashes and embedded
+      quotes); `restype` is `c_void_p` so the 64-bit return value is not truncated; all named
+      values (`"runas"`, the show-window flags, the `> 32` threshold, statuses) are `[INTERNAL]`
+      constants in `config/constants.py`.
+- [x] **`--no-elevate` flag** — runs unelevated (e.g. under an IDE debugger, where the elevated
+      copy is a new process the debugger is not attached to). The roadmap made elevation
+      unconditional; CLAUDE.md instruction 9 / dev-standards Layer 2 say no feature runs
+      unconditionally, so a command-line opt-out was added (a full settings flag was judged too
+      heavy: it would need settings loaded before elevation).
+- [x] **`suppress_launcher_console: bool = True`** global setting (settings.json, Settings tab →
+      "Startup" → "Hide console window on launch (Windows)"; takes effect on next restart).
+      Chooses the `nShowCmd` for the relaunch: `WIN_SW_HIDE` (0) or `WIN_SW_SHOWNORMAL` (1).
+      `main.py` reads it straight from settings.json (it runs before the settings store exists)
+      and falls back to hide if unreadable. Verified `SW_HIDE` hides only the console window,
+      not the app's Tk window. Trade-off: with the console hidden, a crash before logging is
+      configured is invisible — documented in the README.
+- [x] README documents the UAC prompt, `--no-elevate`, declining the prompt, and the
+      hidden-console trade-off.
 
-      def _ensure_admin() -> None:
-          """
-          Relaunch the process with UAC elevation if not already running as admin.
-          Windows only. On Linux this function is never called.
-          No-ops silently if elevation cannot be determined — app continues and
-          USB reset will fail gracefully at runtime if elevation is missing.
-          """
-          try:
-              is_admin = ctypes.windll.shell32.IsUserAnAdmin()
-          except Exception:
-              return  # cannot determine — proceed and fail gracefully later
-
-          if not is_admin:
-              # Relaunch with UAC prompt (runas verb). Original process exits cleanly.
-              ctypes.windll.shell32.ShellExecuteW(
-                  None,
-                  "runas",
-                  sys.executable,
-                  " ".join(f'"{a}"' for a in sys.argv),
-                  None,
-                  1,  # SW_SHOWNORMAL
-              )
-              sys.exit(0)
-
-      if platform.system() == "Windows":
-          _ensure_admin()
-      ```
-- [ ] This triggers a single UAC prompt at launch. Once elevated, the whole session
-      runs as admin — the user is not prompted again mid-run.
-- [ ] Add a docstring comment above the call explaining why:
-      ```python
-      # USB port reset (Level 3 recovery) requires admin elevation on Windows.
-      # Self-elevate now so UAC fires once at startup rather than mid-recovery.
-      # On Linux this is skipped — uhubctl does not require elevation.
-      ```
-- [ ] This is Windows-only code. The `platform.system()` guard is non-negotiable —
-      `ctypes.windll` does not exist on Linux and will crash without it.
-
-**Files:** `main.py`
+**Files:** `main.py`, `config/constants.py`, `config/settings.py`,
+`config/settings.example.json`, `ui/settings_tab.py`, `README.md`
 
 ---
 
-**Part 2 — PowerShell PnP USB reset in `bot/device_manager.py`**
+**Part 2 — PowerShell PnP USB reset (as built)**
 
-- [ ] Add `pnp_instance_id: str = ""` to `DeviceConfig` in `config/devices.py`.
-      This is the Windows PnP InstanceId for the device's USB entry, retrieved by
-      running `Get-PnpDevice` in PowerShell. Default empty string = "not configured,
-      skip USB reset for this device." Per-device because each phone is its own PnP
-      entry. Follows config placement rule: per-device options → devices.json.
-- [ ] Add the field to the Device Settings dialog — label "PnP Instance ID (USB reset)",
-      text entry, note:
-      "Run in PowerShell: Get-PnpDevice | Where-Object { $_.FriendlyName -like '*Android*' }
-      | Select-Object FriendlyName, InstanceId — paste the InstanceId here.
-      Leave blank to skip USB reset for this device."
-      Follows Layer 2 — feature is visible in UI with explicit on/off state per device.
-- [ ] Add `reset_usb_port(serial: str) -> bool` to `DeviceManager`:
-      ```python
-      def reset_usb_port(self, serial: str) -> bool:
-          """
-          Attempt a USB port power cycle via PowerShell PnP cmdlets (Windows only).
-          Requires pnp_instance_id in device config and admin elevation in the process.
-          Returns True if disable+enable dispatched without error; False on any failure.
-          Does not verify ADB re-enumeration — caller must wait and retry ADB afterward.
-          Only called after scrcpy-layer recovery (Level 2) has already failed.
-
-          Windows: Disable-PnpDevice / Enable-PnpDevice (same PnP layer as devcon.exe,
-                   no extra binary required).
-          Linux:   Not implemented here — uhubctl handles this at the MINISFORUM host.
-                   See Future/maybe section.
-          """
+- [x] `pnp_instance_id: str = ""` on `DeviceConfig` (`config/devices.py`). Blank = not
+      configured = USB reset skipped for that device.
+- [x] **Which InstanceId.** The originally suggested query
+      (`Get-PnpDevice | Where FriendlyName -like '*Android*'`) was wrong: it returns only
+      Samsung `Android ADB Interface` child nodes with opaque IDs
+      (`USB\VID_04E8&PID_6860&ADB\8&F6A2F79&0&0003`), dozens of stale "Unknown" ghosts, and no
+      Pixels at all. The right node is the present **top-level USB device whose InstanceId ends
+      with the phone's ADB serial**, e.g. `USB\VID_18D1&PID_4EE7\<serial>` (Pixel) or
+      `USB\VID_04E8&PID_6860\<serial>` (Samsung composite device) — verified on 7 phones.
+- [x] Device Settings dialog: "USB port reset (Windows)" section with a **"PnP Instance ID
+      (USB reset)"** field and a **Detect** button that looks the ID up from the ADB serial
+      (background thread, polled from the UI thread — never freezes). Detect only fills the
+      field; nothing is saved until Save; a failed Detect never overwrites an existing value;
+      Save rejects a malformed ID inline; Detect is disabled off Windows. The note gives a
+      working PowerShell fallback with the phone's own serial pre-filled. The field is the
+      source of truth; empty = off (Layer 2).
+- [x] `tools/usb_pnp.py` (new, reusable): `find_instance_id`, `disable_device`,
+      `enable_device`, `power_cycle_device`, `is_valid_instance_id`, `is_elevated`, plus a CLI
+      (`python -m tools.usb_pnp detect|reset <adb_serial>`) for manual tests.
+- [x] `DeviceManager.reset_usb_port(serial) -> bool`. Skips with a WARNING and returns False
+      when: not Windows; `pnp_instance_id` blank; ID has an invalid format; process not
+      elevated. Otherwise WARNING "Attempting USB port reset…", power-cycles, INFO on success,
+      ERROR with the reason on failure. Carries the roadmap's comment block (why PowerShell,
+      the rejected alternatives, the Linux/uhubctl path).
+- [x] **Safety properties:** the InstanceId is user-entered config used by an elevated
+      process, so it is never interpolated into PowerShell source — it travels in an
+      **environment variable** and is format-validated (`PNP_INSTANCE_ID_PATTERN`);
+      `-ErrorAction Stop` + `try/catch … exit 1` make failures non-zero exits (Disable/Enable-
+      PnpDevice raise non-terminating errors by default, so a failed reset would otherwise look
+      like success); **Enable is always attempted** (retried once) even if Disable failed, and
+      a failure message says the device may be left disabled and gives the exact
+      `Enable-PnpDevice` command; PowerShell runs with `-NoProfile -NonInteractive` and
+      `CREATE_NO_WINDOW`.
+- [x] Constants (`config/constants.py`): `USB_RESET_REENUM_WAIT_S = 3.0`, `USB_RESET_TIMEOUT_S =
+      10.0`, `USB_RESET_ADB_REAPPEAR_TIMEOUT_S = 20.0`, `USB_RESET_MIN_INTERVAL_S = 600.0`
+      (all `[TUNABLE]`) and the internal poll interval, retry count, lookup timeout, regex,
+      PowerShell exe/scripts and env-var names.
+- [x] **Wiring — differs from the original plan.** The roadmap put the reset inside
+      `_rebuild_backend()`. That is only reached from the worker's tap-failure Level 3 (a live
+      video stream but failing taps), which is **not** the path a phone dropping off ADB takes:
+      scrcpy reconnect exhaustion leads to the worker's ADB-failure counter and a worker stop,
+      never `_rebuild_backend`. It is wired at the **ADB failure threshold** instead, via
+      `DeviceManager.recover_via_usb_reset(serial)` passed to the worker as
+      `recover_via_usb_reset_fn`. `_rebuild_backend` is unchanged.
       ```
-      Define interface and docstring before implementing (Layer 10).
-- [ ] Add these constants to `config/constants.py`:
-      ```python
-      USB_RESET_REENUM_WAIT_S: float = 3.0  # [TUNABLE] Seconds to wait after
-                                              # Enable-PnpDevice before retrying ADB.
-                                              # Allows Windows time to re-enumerate
-                                              # the device on the bus.
-
-      USB_RESET_TIMEOUT_S: float = 10.0     # [TUNABLE] Subprocess timeout for each
-                                              # PowerShell PnP cmdlet call. PowerShell
-                                              # startup adds ~1–2s overhead even for
-                                              # fast commands — 10s is safe.
-      ```
-- [ ] The PowerShell commands to execute:
-      ```powershell
-      Disable-PnpDevice -InstanceId "<pnp_instance_id>" -Confirm:$false
-      Enable-PnpDevice  -InstanceId "<pnp_instance_id>" -Confirm:$false
-      ```
-      Called via `subprocess.run(["powershell", "-Command", "..."])`.
-      Sleep `USB_RESET_REENUM_WAIT_S` between disable and enable, and again after
-      enable, before returning. Use `time.sleep` — this runs in a recovery context on
-      a background thread, blocking is acceptable.
-- [ ] Skip immediately (log WARNING, return False) if any of these are true:
-      - `platform.system() != "Windows"`
-      - `cfg.pnp_instance_id` is empty
-      - Process is not elevated (check `ctypes.windll.shell32.IsUserAnAdmin()`)
-      Follows Layer 11 (defensive programming) and Layer 6 (graceful failure).
-- [ ] Wire into `_rebuild_backend()` between ADB-check failure and giving up:
-      ```
-      disconnect old backend
+      worker: consecutive ADB failures reach adb_failure_threshold
             ↓
-      check adb devices
-            ↓ (device present) → rebuild scrcpy normally
-            ↓ (device missing)
-      attempt scrcpy-layer recovery (pkill + forward --remove-all + retry connect)
-            ↓ (device now present) → rebuild scrcpy
-            ↓ (still missing)
-      attempt USB reset via reset_usb_port() — Windows only, if pnp_instance_id set
-            ↓ wait USB_RESET_REENUM_WAIT_S
-      check adb devices again
-            ↓ (now present) → rebuild scrcpy, log INFO "USB reset recovered {serial}"
-            ↓ (still missing) → log ERROR, return False — end of automated recovery
+      recover_via_usb_reset(serial)
+            ↓ skipped (worker stops as before) if: pnp_instance_id blank/invalid, not elevated,
+            ↓ not Windows, or this device was already reset < USB_RESET_MIN_INTERVAL_S ago
+      reset_usb_port: Disable-PnpDevice → wait 3 s → Enable-PnpDevice (retry once)
+            ↓
+      poll a LIVE `adb devices` for up to 20 s (abandons if the worker was stopped)
+            ↓ back                                   ↓ still missing
+      INFO "USB reset recovered {serial}"      ERROR — end of automated recovery,
+      → _rebuild_backend → worker resumes,     worker stops as before
+        failure counter reset
       ```
-- [ ] Log at WARNING when USB reset is attempted. Log at INFO if device comes back.
-      Log at ERROR if device is still missing — this is the final automated step.
-- [ ] Add this comment block at the top of `reset_usb_port`:
-      ```python
-      # Windows USB reset via PowerShell Disable-PnpDevice / Enable-PnpDevice.
-      # These cmdlets operate at the same Windows PnP driver level as devcon.exe
-      # but require no extra binary — PowerShell is built into Windows.
-      # Both require administrator elevation (handled at startup in main.py).
-      #
-      # pyusb dev.reset() was tested and rejected — it does not trigger full
-      # Windows re-enumeration, so the device does not reappear in adb devices.
-      # uhubctl does not work on Windows (winusb.sys driver limitation).
-      #
-      # Linux migration path: replace this method with uhubctl port power cycling.
-      # uhubctl -l <hub_location> -p <port> -a cycle
-      # Sabrent HB-BU10 (Realtek 0bda) on MINISFORUM is confirmed uhubctl-compatible.
-      ```
-      Follows Layer 8 — comment the why, the rejected alternatives, and the future path.
+      ADB return is **polled**, not a fixed second sleep (phones take ~5–15 s to re-enumerate
+      and re-authorize). The rate limit (a sixth safeguard beyond the plan) stops a flapping
+      phone being power-cycled in a loop overnight.
+- [x] Logging: WARNING when a reset is attempted, INFO when the device comes back, ERROR when
+      it is still missing or the reset fails.
+- [x] Verification: mocked tests for every branch of `reset_usb_port`, `recover_via_usb_reset`
+      and the worker's threshold handling; real PowerShell for lookup (6/6 online phones) and
+      for failure visibility / injection safety with bogus IDs; **manual hardware test passed
+      2026-09-20** — `tools.usb_pnp detect` found the right InstanceId and `reset` power-cycled
+      a dropped Note 20 Ultra, which re-enumerated and reappeared in the UI. The complete
+      worker → threshold → recovery → rebuild path has only been exercised with mocks.
 
-**Files:** `bot/device_manager.py`, `config/devices.py`, `config/constants.py`,
-`ui/device_settings_dialog.py`
+**Files:** `bot/device_manager.py`, `bot/device_worker.py`, `config/devices.py`,
+`config/constants.py`, `ui/device_settings_dialog.py`, `tools/usb_pnp.py`,
+`tools/__init__.py`, `README.md`
 
 ---
 
@@ -674,6 +719,13 @@ is an accepted hard requirement for this app.
   yet cropped for all devices — must be done per-device before rejoin will work
 - scrcpy startup race condition on Pixel 6 Pro — occasional "Failed to read device header"
   on launch; recovers on Stop All + Start; may need SCRCPY_SERVER_BIND_SETTLE_S increase
+- USB reset recovery (8-H) has been run end to end on hardware only through the CLI
+  (`python -m tools.usb_pnp reset <serial>`, passed 2026-09-20). The automatic path — worker hits
+  the ADB failure threshold → reset → poll ADB → rebuild — is covered by mocked tests, not yet by a
+  live drop.
+- With `suppress_launcher_console` on (the default), a crash before logging is configured (e.g. a
+  bad import at startup) is invisible in the hidden console. Untick the setting or run
+  `python main.py --no-elevate` from a terminal to see it.
 
 ---
 
@@ -696,7 +748,25 @@ is an accepted hard requirement for this app.
       found`), put the pattern(s) in config/constants.py, and share one helper between both
       checks. Also decide whether `error: device offline` (ADB Offline) should count as a
       failure — it is not matched today either. Check the same assumption in
-      `bot/actions.py` and the capture backends.
+      `bot/actions.py` and the capture backends. Fixing this also widens the set of failure shapes
+      that reach the ADB-failure counter which triggers USB reset recovery (8-H).
+
+- [ ] `replace_capture_backend` clears the wrong attribute — `DeviceWorker.replace_capture_backend`
+      sets `self._latest_frame = None`, but the worker reads `self._last_frame`, so the previous
+      backend's last frame is not cleared after a backend swap (it is only overwritten by the next
+      successful capture, and `_resolve_tap_coords` can use it in the meantime). Pre-existing; found
+      during Phase 8-A. Fix: clear `_last_frame` (that attribute is never `_latest_frame` on the
+      worker).
+
+- [ ] UI saves are not serialized with the worker's tap-cache writes — the crop tool, capture tab and
+      main tab read-modify-write devices.json without `DeviceManager._tap_cache_lock` (added in 8-A,
+      which only serializes worker-vs-worker writes). Rare: it needs a UI save at the same moment as a
+      first-time tap-coordinate discovery. Fix: route every devices.json write through one locked save
+      path.
+
+- [ ] `DeviceManager.get_all_status()` runs `adb devices` (10 s timeout) on the Tk main thread. 8-B made
+      it ~5× less frequent (10 s TTL), but a hung `adb` can still freeze the window for up to 10 s.
+      Fix: refresh the ADB cache on a background thread and let the UI poll read only the cached value.
 
 ---
 
@@ -705,3 +775,7 @@ is an accepted hard requirement for this app.
 - Automated tests (natural candidates: _resolve_tap_coords priority chain, rejoin state dispatch)
 - scrcpy live view window per device
 - Pixel 6 Pro scrcpy settle time investigation (intermittent startup failure)
+- Linux USB reset via `uhubctl` (`uhubctl -l <hub_location> -p <port> -a cycle`) for the MINISFORUM
+  deployment — the Sabrent HB-BU10 hub (Realtek 0bda chipset) is confirmed uhubctl-compatible. Would
+  replace `DeviceManager.reset_usb_port`'s Windows PowerShell path on Linux and needs a per-device hub
+  location/port setting. Not implemented until the Linux migration (see 8-H).
