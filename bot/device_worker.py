@@ -555,13 +555,9 @@ class DeviceWorker:
         if cfg.stay_awake_enabled:
             now = time.monotonic()
             if now - self._last_stay_awake_tap >= cfg.stay_awake_interval_s:
-                ok = stay_awake_tap(self._serial)
+                stay_awake_tap(self._serial)
                 self._last_stay_awake_tap = now
                 self._set_last_action("Stay-awake tap")
-                if ok:
-                    self._record_tap_success()
-                else:
-                    self._handle_tap_failure(settings)
 
         if state == states.DISCONNECTED:
             self._handle_disconnected(cfg, settings)
