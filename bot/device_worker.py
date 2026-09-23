@@ -266,6 +266,8 @@ class DeviceWorker:
                 settings = self._get_settings()
                 cfg = self._get_device_cfg()
 
+                self._maybe_stay_awake_tap(cfg)
+
                 frame = self._capture.get_frame()
                 if frame is None:
                     if self._capture.is_reconnecting:
@@ -332,6 +334,16 @@ class DeviceWorker:
                 if settings.development_mode:
                     raise
                 time.sleep(settings.loop_interval_s)
+
+    def _maybe_stay_awake_tap(self, cfg: DeviceConfig) -> None:
+        if not cfg.stay_awake_enabled:
+            return
+        now = time.monotonic()
+        if now - self._last_stay_awake_tap < cfg.stay_awake_interval_s:
+            return
+        stay_awake_tap(self._serial)
+        self._last_stay_awake_tap = now
+        self._set_last_action("Stay-awake tap")
 
     # ------------------------------------------------------------------
     # Consecutive failure handling
@@ -552,12 +564,6 @@ class DeviceWorker:
     # ------------------------------------------------------------------
 
     def _act(self, state: str, detect_result, cfg: DeviceConfig, settings: Settings) -> None:
-        if cfg.stay_awake_enabled:
-            now = time.monotonic()
-            if now - self._last_stay_awake_tap >= cfg.stay_awake_interval_s:
-                stay_awake_tap(self._serial)
-                self._last_stay_awake_tap = now
-                self._set_last_action("Stay-awake tap")
 
         if state == states.DISCONNECTED:
             self._handle_disconnected(cfg, settings)
