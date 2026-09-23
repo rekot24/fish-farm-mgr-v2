@@ -175,6 +175,7 @@ class DeviceWorker:
         self._unknown_entered_at: Optional[float] = None
         self._consecutive_adb_failures: int = 0
         self._consecutive_tap_failures: int = 0
+        self._consecutive_stay_awake_failures: int = 0
 
         self._last_frame = None
 
@@ -341,9 +342,19 @@ class DeviceWorker:
         now = time.monotonic()
         if now - self._last_stay_awake_tap < cfg.stay_awake_interval_s:
             return
-        stay_awake_tap(self._serial)
-        self._last_stay_awake_tap = now
-        self._set_last_action("Stay-awake tap")
+        ok = stay_awake_tap(self._serial)
+        if ok:
+            self._last_stay_awake_tap = now
+            self._consecutive_stay_awake_failures = 0
+            self._set_last_action("Stay-awake tap")
+        else:
+            self._consecutive_stay_awake_failures += 1
+            self._log(
+                f"Stay-awake tap failed (consecutive: {self._consecutive_stay_awake_failures}) — "
+                f"will retry next loop cycle instead of waiting the full "
+                f"{cfg.stay_awake_interval_s:.0f}s interval",
+                "WARNING",
+            )
 
     # ------------------------------------------------------------------
     # Consecutive failure handling
