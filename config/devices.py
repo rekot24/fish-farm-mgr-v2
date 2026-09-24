@@ -91,6 +91,11 @@ class DeviceConfig:
     stay_awake_enabled: bool = False
     stuck_lobby_detection_enabled: bool = True
 
+    # False = skip the 24rolla-avatar fast path and always rejoin via the hamburger
+    # menu. Needed on the account that IS 24rolla, where tapping its own avatar
+    # doesn't lead to a join. Per-device because the account is per-device.
+    quick_join_enabled: bool = False
+
     # Windows PnP InstanceId of this phone's USB device (e.g.
     # USB\VID_18D1&PID_4EE7\<adb serial>), used for the last-resort USB port reset.
     # Blank = not configured: USB reset is skipped for this device. Filled in via the

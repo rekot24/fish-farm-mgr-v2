@@ -75,6 +75,7 @@ Each handler taps its OWN element — the next cycle detects the resulting scree
 
 Fast-path rejoin (when 24rolla is visible on home screen):
   ROBLOX_HOME → tap 24rolla_avatar (tap target) → JOIN_BUTTON → tap Join → IN_TANK
+  Skipped entirely when DeviceConfig.quick_join_enabled is False.
 
 Fallback rejoin (hamburger menu route):
   ROBLOX_HOME → tap hamburger_menu (tap target)
@@ -686,19 +687,26 @@ class DeviceWorker:
         self._reset_lobby_timer()
         self._pause_auto_farm_timer()
         self._reset_end_run_timer()
-        coords = self._resolve_tap_coords(cfg, ["24rolla_avatar"])
-        if coords:
-            self._log("24rolla visible on home screen — tapping avatar (fast path)", "INFO")
-            ok = tap(self._serial, coords[0], coords[1])
-            if ok:
-                self._record_tap_success()
-            else:
-                self._handle_tap_failure(settings)
-            self._set_last_action("Tapped 24rolla avatar (fast path)")
-            return
+
+        # Fast path only when the device's quick_join_enabled flag is on. Checked every
+        # cycle, not cached, per the feature-flag standard.
+        if cfg.quick_join_enabled:
+            coords = self._resolve_tap_coords(cfg, ["24rolla_avatar"])
+            if coords:
+                self._log("24rolla visible on home screen — tapping avatar (fast path)", "INFO")
+                ok = tap(self._serial, coords[0], coords[1])
+                if ok:
+                    self._record_tap_success()
+                else:
+                    self._handle_tap_failure(settings)
+                self._set_last_action("Tapped 24rolla avatar (fast path)")
+                return
+
         coords = self._resolve_tap_coords(cfg, ["hamburger_menu"])
         if coords:
-            self._log("24rolla not visible — tapping hamburger menu (fallback path)", "INFO")
+            reason = ("quick join disabled" if not cfg.quick_join_enabled
+                      else "24rolla not visible")
+            self._log(f"{reason} — tapping hamburger menu (fallback path)", "INFO")
             ok = tap(self._serial, coords[0], coords[1])
             if ok:
                 self._record_tap_success()
@@ -706,8 +714,7 @@ class DeviceWorker:
                 self._handle_tap_failure(settings)
             self._set_last_action("Tapped hamburger menu (fallback path)")
         else:
-            self._log("Neither 24rolla_avatar nor hamburger_menu found on home screen",
-                      "WARNING")
+            self._log("hamburger_menu not found on home screen", "WARNING")
 
     def _handle_join_button(self, cfg: DeviceConfig, settings: Settings) -> None:
         self._unknown_entered_at = None

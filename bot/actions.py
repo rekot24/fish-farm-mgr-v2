@@ -16,6 +16,7 @@ from config.constants import (
     DOUBLE_CLICK_DELAY_S,
     STAY_AWAKE_TAP_X,
     STAY_AWAKE_TAP_Y,
+    STAY_AWAKE_HOLD_MS,
 )
 from config.paths import adb_exe
 
@@ -62,7 +63,9 @@ def double_tap(serial: str, x: int, y: int, delay_s: float = DOUBLE_CLICK_DELAY_
 
 
 def stay_awake_tap(serial: str) -> bool:
-    return tap(serial, STAY_AWAKE_TAP_X, STAY_AWAKE_TAP_Y)
+    """Press and hold at the stay-awake point for STAY_AWAKE_HOLD_MS. Returns True on success."""
+    x, y = str(STAY_AWAKE_TAP_X), str(STAY_AWAKE_TAP_Y)
+    return _adb(serial, "shell", "input", "swipe", x, y, x, y, str(STAY_AWAKE_HOLD_MS))
 
 
 def adb_reconnect(serial: str) -> bool:

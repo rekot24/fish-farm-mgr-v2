@@ -125,8 +125,24 @@ class DeviceSettingsDialog(tk.Toplevel):
             foreground=COLOR_NOTE, font=("", 9), justify="left"
         ).grid(row=14, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
+        ttk.Separator(frame, orient="horizontal").grid(
+            row=15, column=0, columnspan=2, sticky="ew", pady=10)
+        ttk.Label(frame, text="Rejoin path", font=("", 10, "bold")).grid(
+            row=16, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        self._quick_join_var = tk.BooleanVar()
+        ttk.Checkbutton(
+            frame, text="Quick join (tap 24rolla avatar on home screen)",
+            variable=self._quick_join_var,
+        ).grid(row=17, column=0, columnspan=2, sticky="w")
+        ttk.Label(
+            frame,
+            text="Turn off on the 24rolla account itself, so this phone always rejoins "
+                 "through the hamburger menu path.",
+            foreground=COLOR_NOTE, font=("", 9), justify="left", wraplength=NOTE_WRAP_PX,
+        ).grid(row=18, column=0, columnspan=2, sticky="w", pady=(2, 0))
+
         btn_frame = ttk.Frame(frame)
-        btn_frame.grid(row=15, column=0, columnspan=2, sticky="e", pady=(16, 0))
+        btn_frame.grid(row=19, column=0, columnspan=2, sticky="e", pady=(16, 0))
         ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(
             side="right", padx=(6, 0))
         ttk.Button(btn_frame, text="Save", command=self._save).pack(side="right")
@@ -151,6 +167,7 @@ class DeviceSettingsDialog(tk.Toplevel):
         # Insert serial directly then lock — bypasses readonly StringVar issue
         self._serial_entry.insert(0, cfg.serial)
         self._serial_entry.config(state="readonly")
+        self._quick_join_var.set(cfg.quick_join_enabled)
 
     def _set_status(self, text: str, color: str) -> None:
         """Show a one-line status under the PnP Instance ID field."""
@@ -216,5 +233,6 @@ class DeviceSettingsDialog(tk.Toplevel):
             end_run_interval_s=_float(self._end_run_var, self._cfg.end_run_interval_s),
             stay_awake_interval_s=_float(self._stay_awake_var, self._cfg.stay_awake_interval_s),
             pnp_instance_id=pnp_id,
+            quick_join_enabled=self._quick_join_var.get(),
         )
         self.destroy()

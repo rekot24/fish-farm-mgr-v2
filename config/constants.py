@@ -59,6 +59,10 @@ LOBBY_STUCK_THRESHOLD_S = 60.0
 # Some Samsung (Knox) devices require this to prevent screen sleep.
 STAY_AWAKE_INTERVAL_S = 30.0
 
+# [TUNABLE] Press-and-hold duration for the stay-awake touch, in ms — a zero-duration
+# tap may not register as user activity on Knox devices (untested hypothesis)
+STAY_AWAKE_HOLD_MS = 100
+
 # [INTERNAL] Screen coordinate tapped by the stay-awake feature.
 # (1, 1) is a safe corner that does not interact with game UI.
 STAY_AWAKE_TAP_X = 1
