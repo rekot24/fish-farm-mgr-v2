@@ -345,6 +345,13 @@ class DeviceWorker:
             return
         ok = stay_awake_tap(self._serial)
         if ok:
+            # >>> add these two lines, before _last_stay_awake_tap is overwritten
+            actual_gap = now - self._last_stay_awake_tap
+            if actual_gap > cfg.stay_awake_interval_s * 1.5:
+                self._log(
+                    f"Stay-awake tap fired late — {actual_gap:.0f}s since last "
+                    f"(interval={cfg.stay_awake_interval_s:.0f}s)", "WARNING")
+            # <
             self._last_stay_awake_tap = now
             self._consecutive_stay_awake_failures = 0
             self._set_last_action("Stay-awake tap")
