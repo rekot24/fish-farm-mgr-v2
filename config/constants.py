@@ -297,3 +297,20 @@ DEVICES_TMP_SUFFIX = ".tmp"
 # or indexer holds a file), then gives up and raises so a stuck lock is loud, not silent.
 DEVICES_SAVE_RETRIES = 20
 DEVICES_SAVE_RETRY_DELAY_S = 0.05
+
+# ---------------------------------------------------------------------------
+# Core/UI boundary check (tools/check_core_imports.py, SPEC S1 task 1)
+# ---------------------------------------------------------------------------
+
+# [INTERNAL] Folders that make up the shared core. They run on Windows (GUI) and on the
+# Linux server (headless), so they must not import UI or Windows-only code at module level.
+CORE_PACKAGES = ("bot", "capture", "detection", "config")
+
+# [INTERNAL] Top-level modules the core must never import at module level: the GUI toolkit,
+# our own ui package, and Windows-only stdlib modules (CLAUDE.md standing instruction 15).
+CORE_FORBIDDEN_ROOT_MODULES = ("tkinter", "ui", "ctypes", "winreg")
+
+# [INTERNAL] Dotted module the core must never import at module level; it is Windows-only
+# (PowerShell PnP). It may only be imported lazily inside the Windows branch of
+# tools/usb_recovery.py.
+CORE_FORBIDDEN_DOTTED_MODULE = "tools.usb_pnp"
