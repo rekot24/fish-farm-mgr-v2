@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import sys
 from pathlib import Path
 from typing import Callable, Optional, TYPE_CHECKING
 
@@ -58,10 +59,14 @@ def register_panel_callback(fn: Callable[[str, str], None]) -> None:
     _panel_callback = fn
 
 
-def configure(settings: Settings, root: Path) -> None:
+def configure(settings: Settings, root: Path, stdout: bool = False) -> None:
     """
     (Re)build logger handlers and routing flags from current settings.
     Safe to call multiple times — clears existing handlers first.
+
+    stdout=True (headless server only) also writes every record to stdout as plain
+    lines at the configured log level, so journald / an SSH terminal can follow the run.
+    The Windows GUI never sets it, so its logging is unchanged.
     """
     global _configured, _route_log_to_panel, _route_debug_to_panel
 
@@ -92,6 +97,14 @@ def configure(settings: Settings, root: Path) -> None:
         file_handler.setLevel(_level_from_name(cfg.level))
         file_handler.setFormatter(_LOG_FORMAT)
         _logger.addHandler(file_handler)
+
+    # stdout — headless server only; same format and level as app.log, never gated
+    # by log_to_file (the terminal / journald is the log viewer there)
+    if stdout:
+        stdout_handler = logging.StreamHandler(sys.stdout)
+        stdout_handler.setLevel(_level_from_name(cfg.level))
+        stdout_handler.setFormatter(_LOG_FORMAT)
+        _logger.addHandler(stdout_handler)
 
     # Panel routing flags — independent of each other and of log_to_file
     _route_log_to_panel = (

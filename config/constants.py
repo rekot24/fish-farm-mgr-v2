@@ -314,3 +314,25 @@ CORE_FORBIDDEN_ROOT_MODULES = ("tkinter", "ui", "ctypes", "winreg")
 # (PowerShell PnP). It may only be imported lazily inside the Windows branch of
 # tools/usb_recovery.py.
 CORE_FORBIDDEN_DOTTED_MODULE = "tools.usb_pnp"
+
+# ---------------------------------------------------------------------------
+# Headless server entry point (main_headless.py, SPEC S1 task 3)
+# ---------------------------------------------------------------------------
+
+# [TUNABLE] Seconds main_headless.py waits for DeviceManager.stop_all() after SIGINT/SIGTERM
+# before logging a WARNING and exiting anyway. stop_all() stops devices one at a time; each
+# worker join is up to 15 s plus up to SCRCPY_DECODE_THREAD_JOIN_TIMEOUT_S for the backend,
+# so ~20 s per device in the worst case. 60 s covers a few devices; raise it if a headless
+# run drives many phones. systemd's own stop timeout (S2) must be longer than this.
+HEADLESS_SHUTDOWN_TIMEOUT_S: float = 60.0
+
+# [INTERNAL] Seconds to wait for `adb version` in the startup preflight. It only prints
+# the client version (no server or phone involved), so it returns in well under a second;
+# 10 s is generous and matches the timeout of the other adb calls.
+HEADLESS_ADB_PREFLIGHT_TIMEOUT_S: float = 10.0
+
+# [INTERNAL] Process exit codes of main_headless.py. 0 = clean run (or nothing requested),
+# 1 = could not do what was asked (no adb, unknown/unavailable device, shutdown timed out).
+# argparse itself exits 2 for a bad command line.
+HEADLESS_EXIT_OK = 0
+HEADLESS_EXIT_FAILURE = 1
