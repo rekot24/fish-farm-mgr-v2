@@ -6,7 +6,33 @@
 
 **Milestone:** S1 — Headless core runs on homelab
 **Status:** not started
-**Last updated:** 2026-10-06
+**Last updated:** 2026-10-07
+
+---
+
+## Amendments (2026-10-07, agreed in Plan mode; these override the text below)
+1. **Corrected shutdown check (task 3).** `pgrep -af "adb.*fork"` matches the adb server itself
+   (`adb -L ... fork-server server`), so it can never be empty. Replace it with
+   `pgrep -af "adb.*shell.*scrcpy"` (the host-side scrcpy launcher) plus `adb forward --list` and
+   `adb reverse --list` showing no entries left by this run. `pgrep -af scrcpy` stays.
+2. **Bounded `stop_all`.** `stop_all()` stops devices one by one (worker join up to 15 s, backend join up to
+   5 s each). `main_headless.py` runs it in a thread and joins with `HEADLESS_SHUTDOWN_TIMEOUT_S`
+   (`config/constants.py`, `[TUNABLE]`). On timeout it logs a WARNING and exits anyway.
+3. **`--start-all` starts connected devices only.** It starts only serials that are both in `devices.json`
+   and listed by `adb devices` in state `device`. `--device <serial>` starts exactly that one. This resolves
+   the open question: there is no "enabled" flag in `devices.json`, and `DeviceManager.start_all()` is not
+   changed (the GUI keeps its behaviour).
+4. **adb preflight.** `main_headless.py` checks that `adb` is runnable before starting anything and exits
+   non-zero with a clear message (`sudo apt install adb`) if not.
+5. **Logging configured first.** `main_headless.py` configures logging (including stdout) before anything
+   else, so nothing falls back to `print`. The stdout handler is an opt-in parameter of
+   `app_logger.configure()`; `main.py` is not modified.
+6. **USB recovery guards.** Every `usb_pnp` call, including `is_valid_instance_id` and `is_elevated`, goes
+   through `tools/usb_recovery.py` or a lazy import inside its Windows branch. The core never imports or
+   calls `usb_pnp` at module level or on Linux. The platform, blank-ID, ID-format, elevation and rate-limit
+   guards keep their order and wording.
+7. **Server config.** Claude Code does not create or edit `config/*.json` on the server; Joshua copies them (M2).
+8. **Pause point.** Work stops after task 3 for Joshua's live test (task 4).
 
 ---
 
