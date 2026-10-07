@@ -9,6 +9,8 @@
 
 A focused Android device farm manager for the Roblox game Be Fish — private tank only. Connects to Android phones via ADB/scrcpy, captures screenshots, reads game state via template matching, and takes automated actions. Each device runs its own independent worker loop. Rebuilt from fish-farm-manager (v1) with dramatically reduced scope: private tank only, simple if/elif state logic, no profiles, no health monitor, no public server logic.
 
+Two modes, one core: the Windows Tkinter GUI (`main.py`) and, being added, a headless server mode for the Ubuntu homelab (`main_headless.py`, first milestone S1 in `SPEC.md`). `bot/`, `capture/`, `detection/` and `config/` are shared and must not import Tkinter or Windows-only code. Goal after S1: a web portal that reproduces the current GUI in a browser, then guest access (see ROADMAP "Current plan").
+
 ---
 
 ## Standards
@@ -16,6 +18,21 @@ A focused Android device farm manager for the Roblox game Be Fish — private ta
 This project follows https://github.com/Rekot24/dev-standards
 Read app-framework.md before making any architectural decisions.
 If asked to do something that conflicts with those standards, flag it before proceeding.
+
+### Known deviations
+*Places this project does NOT follow dev-standards. Settled deviations are not re-raised each session; only a NEW conflict is.*
+
+| Deviation | Why | What fixes it (milestone) |
+|---|---|---|
+| Web portal uses FastAPI beside the Python workers, not the dev-standards web default (Next.js) | The portal must live in the same process/host as the workers and talk to ADB; a separate Node stack would add a second service and an API hop | Not planned; revisit only if the portal outgrows a small front end (S4) |
+| Two entry points: `main.py` (Tkinter GUI, Windows) and `main_headless.py` (server) | The Windows GUI must keep working exactly as it does today; the server runs headless | None — intended. Both stay thin over the shared core (S1) |
+| USB recovery picked by platform: Windows PnP (`tools/usb_pnp.py`) and, on Linux, a stub until sysfs/uhubctl lands | Windows method is proven on the farm; Linux hardware path needs on-device confirmation | S3 (Linux USB recovery) |
+| Headless logs also go to stdout (journald-friendly) alongside rotating files; Windows keeps `logs/app.log` | systemd/journalctl is the server's log viewer | None — intended (S1/S2) |
+
+## Working docs
+- `ROADMAP.md` — the path: goal, milestones, "not now" list, issues, log
+- `SPEC.md` — the **current milestone only**. Follow it. Build only what it lists.
+- This file — how to work here and where things are
 
 ---
 
@@ -130,6 +147,9 @@ Each device card shows:
 - **2026-09-20 (follow-up)** Tap-failure ladder: the soft (adb reconnect) attempt does NOT reset the counter; the hard threshold is checked first; a failed Level 3 rebuild tries USB reset (`_try_usb_reset_recovery`, shared with the ADB-failure path) before the worker stops. `recover_via_usb_reset` refuses to run for a stopped worker.
 - **2026-09-20 (follow-up)** **ADB never runs on the Tk thread.** `get_all_status`/`get_status` read a snapshot and start one single-flight background refresh when it is older than `ADB_STATUS_CACHE_TTL_S` (`adb_connected` is omitted until the first result; the UI defaults it to True); `_connected_serials()` is live-only and only for worker/background threads. Every `subprocess` call in `ui/` must be inside a thread target (checked statically). `App._poll` logs failures (once per distinct message) instead of swallowing them.
 - **2026-09-20 (follow-up)** Reading the code is not enough to claim a failure mode: my "tap failures reach the rebuild" analysis was wrong until a simulation showed the counter never got past 4. Reproduce the failure with the real loop / real adb output before proposing or writing a fix.
+- **2026-10-06** Phase 8 soak test passed: the app runs 24/7 on all farm devices with no reboot. The stay-awake problem was caused by `capture/scrcpy_socket.py` retrying ADB for about 153 s before the USB reset took over (commit a40f782: `RECONNECT_ATTEMPTS` 1, `ADB_RECONNECT_WAIT_S` 15.0, `ADB_TRANSPORT_RECOVERY_ATTEMPTS` 1); nothing else to address there.
+- **2026-10-06** Server mode is the existing app run headless, not a rewrite. Portal = the current GUI in a browser (FastAPI + a small front end from the same service); detectors and config are per machine, never synced through git; guest access via Cloudflare Tunnel + Access (Start/Stop and End Run on assigned devices only). Order: S1 headless core, S2 systemd + `/status`, S3 Linux USB recovery, S4 portal, S5 guests (ROADMAP "Current plan").
+- **2026-10-06** A phone can be driven by only one machine at a time, so testing on homelab means physically moving one phone off the Windows hub.
 
 ## Tried and rejected
 
@@ -154,15 +174,21 @@ Each device card shows:
 
 ## Current state
 
-- Working: Phases 0–8 and the Phase 8 follow-up are complete, merged to `main` and pushed (see ROADMAP.md). Per-device workers (capture → detect → if/elif state → act) on scrcpy capture; state-driven rejoin navigation; crop tool; redesigned UI. Phase 8: thread-safe persistence, throttled decode, lightweight foreground check, frame lock, Windows UAC self-elevation (`--no-elevate`, `suppress_launcher_console`), and USB port reset recovery (Level 4) with a per-device PnP Instance ID + Detect button. Follow-up: adb "device gone" wording fixed (`tools/adb_errors.py`), tap-failure ladder now reaches the scrcpy rebuild and then USB reset, memory-as-source-of-truth device persistence (atomic `save_devices`, crop tool/capture tab through the live store), and ADB never on the Tk thread (non-blocking status poll, End run and Add device on threads, poll errors logged).
-- In progress: nothing. `main` and `origin/main` are in sync; the Phase 8 and follow-up branches are deleted.
-- Known broken / unverified: (1) the Phase 8 goal itself — no reboot after 12–18 h — has NOT been confirmed by a soak; (2) verified with mocks, simulations of the real worker loop, real adb output and real PowerShell, but never on the farm for a long run: the tap-failure ladder now really rebuilds scrcpy after 10 failed taps (never ran on hardware before) and the automatic USB-reset path; (3) a stale frame still resets the ADB-failure counter (decided; see Key decisions); (4) rejoin navigation is still untested end-to-end on a live crash; (5) open Pending fixes in ROADMAP.md: `replace_capture_backend` clears `_latest_frame` instead of `_last_frame`, DeviceCard "Starting…" stuck on failed start, dead `reload_devices` wiring.
-- Next: run the overnight soak and read `logs/app.log` for the new WARNING lines (`Device gone`, `Tap failures reached`, `USB reset`, `Main tab refresh failed`); then the small Pending fixes.
+- Working: Phases 0–8, the Phase 8 follow-up and the Sep 22–25 stay-awake/reconnect fixes are complete, merged to `main` and pushed (see ROADMAP.md). Per-device workers (capture → detect → if/elif state → act) on scrcpy capture; state-driven rejoin navigation; crop tool; redesigned UI; thread-safe persistence; USB-reset recovery (Level 4); stay-awake tap fires every loop cycle; per-device `quick_join_enabled`. **Soak test passed (2026-10-06): runs 24/7 on all farm devices, no reboot needed.**
+- In progress: S1 — headless core runs on homelab (`SPEC.md`, not started). Work on a branch, not `main`.
+- Known broken / unverified: (1) a stale frame still resets the ADB-failure counter (decided; see Key decisions); (2) rejoin navigation not specifically tested end-to-end on a live crash; (3) a few devices have landed in the ADB_DISCONNECTED card state after the single automatic USB reset — a second attempt is a ROADMAP Pending fix (verify in logs first); (4) other open Pending fixes in ROADMAP.md: `replace_capture_backend` clears `_latest_frame` instead of `_last_frame`, DeviceCard "Starting…" stuck on failed start, dead `reload_devices` wiring, two hardcoded 10 s waits in `_recover_adb_transport`.
+- Next: S1 per `SPEC.md` (Plan mode first; one milestone per session). Then S2 systemd service + `/status`.
 
 
 ---
 
 ## Session log
+
+### 2026-10-06 — Planning session (Cowork, no code changed)
+Reviewed repo state with Joshua: last commit a40f782 (Sep 25), no commits since. Recorded the soak-test pass and the stay-awake root cause. Confirmed the core (`bot/`, `capture/`, `detection/`, `config/`) has no Tkinter imports; the only Windows coupling is `bot/device_manager.py` importing `tools.usb_pnp`, and `main.py`'s elevation code. Planned S1–S5, wrote `SPEC.md` for S1, added "Current plan" to ROADMAP, added Known deviations here.
+- Decisions: see Key decisions dated 2026-10-06.
+- Parked: second USB-reset attempt for ADB_DISCONNECTED (ROADMAP Pending fixes; verify in `logs/app.log` first, touches USB recovery so it goes through SPEC.md after S1).
+- Next: S1 in Plan mode.
 
 ### 2026-09-20 — Phase 8 follow-up (recovery-chain hardening), branch `phase-8-followup`
 Pushed `main`, branched, read ROADMAP.md and CLAUDE.md in full, then worked three items one at a time (explain → confirm → implement → test → commit). Each premise was checked against the code and real adb output first; two of my own claims were corrected along the way.
@@ -213,3 +239,9 @@ These apply every session without being included in the prompt:
 10. The UI never writes to workers directly. UI → settings store → worker reads → worker acts.
 11. GitHub MCP is READ ONLY. Never attempt push_files, create_or_update_file, or any write operation via GitHub tools. Provide file contents for Joshua to push manually with a commit message.
 12. At the end of every session, update this file: add a dated session log entry, update current state, add decisions, add anything tried and rejected. Commit the updated CLAUDE.md as the final commit of the session.
+13. Follow `SPEC.md` for the current milestone. Build only what it lists. New ideas go on the "Not now" list in `ROADMAP.md`, not into the build; scope changes go back to chat.
+14. Start every session in Plan mode: restate the milestone, explain what you will do and why, wait for approval. One milestone per session. Work on a branch, never directly on `main`.
+15. Core code (`bot/`, `capture/`, `detection/`, `config/`) never imports Tkinter, `ui`, or Windows-only code at module level. Every SPEC includes the Windows GUI smoke test (launches, device cards show state, start/stop works); a milestone is not done until it passes.
+16. Closing a milestone is the last task in its SPEC: log the result in ROADMAP, record decisions here, move unfinished work to ROADMAP "Pending fixes", reset SPEC.md to its empty template.
+17. Never commit `config/devices.json`, `config/settings.json`, `assets/detectors/`, logs, device serials mapped to accounts, private server links, or anything in `Claude outputs/`. The repo is public.
+18. Commit messages: summary line `type: description`, then Why / What changed / Verified / Notes (dev-standards Layer 12).

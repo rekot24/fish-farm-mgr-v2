@@ -4,6 +4,53 @@ Living document. Completed items are checked off, not deleted — history matter
 
 ---
 
+## Current plan (updated 2026-10-06)
+
+**Goal.** Keep the Windows farm app running 24/7, and add a server mode: the same app running headless on the
+homelab (Ubuntu), with a web portal that reproduces the current GUI in a browser, then guest access for friends.
+No hard date.
+
+**Status right now.** The Windows build runs 24/7 on all farm devices. Soak test passed (2026-10-06, reported by
+Joshua: in daily use with no reboot needed). Server track starts now: S1 is in progress, see `SPEC.md`.
+
+**Now**
+- [ ] **S1 — Headless core runs on homelab.** Second entry point, USB recovery behind a platform-chosen
+  interface, one real phone driven from homelab. Windows GUI unchanged.
+
+**Next** (ordered; each one or two sessions)
+1. [ ] **S2 — Headless service on homelab.** systemd unit (Restart=always, starts on boot, journalctl), `/status`
+   JSON endpoint (FastAPI skeleton), deploy/rollback steps from the project instructions.
+2. [ ] **S3 — Linux USB recovery.** sysfs unbind/rebind and `uhubctl` per-port power cycling behind the same
+   interface as Windows. Needs on-device confirmation that uhubctl works on the Sabrent HB-BU10 hub.
+3. [ ] **S4 — Web portal, GUI parity.** Main tab (device cards and controls), Device tab, Settings, and
+   capture/detector management including the crop tool. Admin access over Tailscale. Nothing the GUI lacks.
+4. [ ] **S5 — Guest access.** Cloudflare Tunnel + Access. Guest sees only assigned device(s): Start/Stop and
+   End Run. Per-device authorization server-side, audit log, one-step revoke. Admin always wins.
+
+**Not now** (parked so they stop competing for attention)
+- 2026-10-06 Live video of a device in the browser (reuse the scrcpy stream) — nice to have; the app runs well
+  without it.
+- 2026-10-06 Browser control window that mimics using the device — later; start through the existing action layer.
+- 2026-10-06 View-only video for guests.
+- 2026-10-06 Auto-resume or reminder when a guest leaves a device stopped.
+- 2026-10-06 Syncing detectors/config between machines — decided: per machine, no sync.
+- 2026-10-06 Phase 9 (scrcpy live view button, card layout) — not started; revisit after S4.
+
+**Decisions worth keeping**
+- 2026-10-06 Portal stack is FastAPI beside the Python workers, not the dev-standards web default — the portal must
+  live with the workers and talk to ADB. Recorded in CLAUDE.md "Known deviations".
+- 2026-10-06 The portal is the current GUI in a browser: nothing added, nothing removed.
+- 2026-10-06 Guest access goes through Cloudflare Tunnel + Access; admin stays on Tailscale; the Gitea mirror is
+  never published through the tunnel.
+- 2026-10-06 One backend, thin views: the headless service owns the workers; portal, `/status` and any push
+  notifications are views over it.
+
+**Log**
+- 2026-10-06 Soak test passed. Planned S1–S5 in chat. Stay-awake problem traced to the capture-reconnect wait
+  (see "Post follow-up changes" below); nothing further to address there.
+
+---
+
 ## Phase 0 — Foundation ✅ Done
 
 - [x] Repo initialized
@@ -829,6 +876,28 @@ was asked; everything below was measured, not assumed.
 
 ---
 
+## Post follow-up changes — stay-awake and reconnect (2026-09-22 → 2026-09-25) ✅ Done
+
+Found after the Phase 8 follow-up, while chasing Samsung screens that locked intermittently. Recorded here after
+the fact (commits are on `main`).
+
+- **39637048 / 09bece3 / c128683** — the stay-awake tap was decoupled from the tap-failure counter, then from
+  `_act()`, and now fires every loop cycle regardless of capture state (it used to be skipped exactly when a screen
+  was most likely asleep).
+- **d7148e6** — per-device `quick_join_enabled` switch ("Rejoin path" checkbox in Device Settings) so the
+  24rolla account skips the avatar fast path that can never join.
+- **8918623** — diagnostic WARNING when a stay-awake tap is more than 1.5x its interval late.
+- **a40f782 (root cause)** — the six logged screen-lock events all traced to `capture/scrcpy_socket.py` retrying
+  ADB for about 153 s before handing over to the USB reset, which clears the problem in about 13 s. Cut
+  `RECONNECT_ATTEMPTS` 3→1, `ADB_RECONNECT_WAIT_S` 30→15, `ADB_TRANSPORT_RECOVERY_ATTEMPTS` 2→1.
+  **Result (reported 2026-10-06): the stay-awake problem is fixed; nothing else to address there.**
+- Also found: two `10.0` second waits inside `_recover_adb_transport` are still hardcoded, not wired to
+  `ADB_RECONNECT_WAIT_S` (see Pending fixes).
+
+**Phase 8 soak test: ✅ PASSED (2026-10-06).** The app has run 24/7 on all farm devices with no reboot needed.
+
+---
+
 ## Known issues / open questions
 
 - scrcpy-server.jar must be placed at assets/scrcpy-server.jar manually (not in repo)
@@ -845,6 +914,9 @@ was asked; everything below was measured, not assumed.
 - With `suppress_launcher_console` on (the default), a crash before logging is configured (e.g. a
   bad import at startup) is invisible in the hidden console. Untick the setting or run
   `python main.py --no-elevate` from a terminal to see it.
+- **Update 2026-10-06:** the long soak is done and passed (24/7 on all devices, no reboot). The two items below remain
+  only partly confirmed: the automatic USB-reset path has run live a few times (it has been enough, see the
+  Pending fix about a second attempt); the tap-failure rebuild at 10 failed taps has not been specifically observed.
 - The follow-up changes are verified with mocks, simulations of the real worker loop, real adb
   output and real PowerShell — but not yet by a long soak on the farm. In particular the tap-failure
   ladder now really rebuilds scrcpy after 10 consecutive failed taps (F-1), which has never run
@@ -895,6 +967,21 @@ was asked; everything below was measured, not assumed.
       it ~5× less frequent (10 s TTL), but a hung `adb` can still freeze the window for up to 10 s.
       Fix: refresh the ADB cache on a background thread and let the UI poll read only the cached value.
       *Resolved: see F-3 (plus the End run button and Add device scan, which had the same problem).*
+
+- [ ] **Second USB-reset attempt when a device stays off ADB.** Joshua has seen a few devices end up in the
+      `ADB_DISCONNECTED` card state after the one automatic USB reset; one reset has otherwise been enough.
+      Idea: allow a second reset. Premises to VERIFY before building (roadmap items are hypotheses): (1) in
+      `logs/app.log`, find those events and confirm whether the first reset ran and failed (`still missing from
+      adb devices ... end of automated recovery`) or was refused by `USB_RESET_MIN_INTERVAL_S` (600 s, in
+      `recover_via_usb_reset`); (2) whether the card state came from the worker stopping after recovery gave up
+      (`ui/main_tab.py` shows ADB_DISCONNECTED only when the worker is not running and adb is not connected).
+      The right fix depends on which of the two it was: retry inside one recovery attempt vs. shorten the
+      interval. Touches USB recovery, so it goes through SPEC.md. Do after S1 (S1 moves this code).
+
+- [ ] Two hardcoded `10.0` s waits inside `_recover_adb_transport` are not wired to `ADB_RECONNECT_WAIT_S` or any
+      constant (flagged in commit a40f782). Move to `config/constants.py` in a cleanup pass.
+
+- [ ] CLAUDE.md "Current state" and ROADMAP were behind the code for Sep 22–25 (fixed 2026-10-06).
 
 - [ ] Dead wiring: `reload_devices` (`main.py`, `ui/app.py`) is passed around but never called. With
       memory as the source of truth (F-2) there is nothing to reload. Delete it and its parameter in a
