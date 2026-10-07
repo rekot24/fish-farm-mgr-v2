@@ -48,7 +48,6 @@ being registered.
 
 from __future__ import annotations
 
-import platform
 import subprocess
 import threading
 import time
@@ -59,7 +58,6 @@ from bot.device_worker import DeviceWorker
 from capture.scrcpy_socket import ScrcpySocketBackend
 from config.constants import (
     ADB_STATUS_CACHE_TTL_S,
-    PLATFORM_WINDOWS,
     USB_RESET_ADB_POLL_INTERVAL_S,
     USB_RESET_ADB_REAPPEAR_TIMEOUT_S,
     USB_RESET_MIN_INTERVAL_S,
@@ -68,7 +66,7 @@ from config.devices import DeviceConfig, save_devices
 from config.paths import project_root, adb_exe
 from config.settings import Settings
 from detection.template_bank import TemplateBank
-from tools import usb_pnp
+from tools import usb_recovery
 
 
 class DeviceManager:
@@ -389,10 +387,10 @@ class DeviceManager:
         Only reached from recover_via_usb_reset, i.e. after the worker has hit its ADB
         failure threshold and scrcpy-layer recovery has already failed.
 
+        The platform-specific work lives behind tools/usb_recovery.py:
         Windows: Disable-PnpDevice / Enable-PnpDevice (same PnP layer as devcon.exe,
                  no extra binary required). Implemented in tools/usb_pnp.py.
-        Linux:   Not implemented here — uhubctl handles this at the MINISFORUM host.
-                 See ROADMAP Future/maybe.
+        Linux:   Stub that reports "not supported" until milestone S3 (sysfs/uhubctl).
         """
         # Windows USB reset via PowerShell Disable-PnpDevice / Enable-PnpDevice.
         # These cmdlets operate at the same Windows PnP driver level as devcon.exe
@@ -407,10 +405,11 @@ class DeviceManager:
         # uhubctl -l <hub_location> -p <port> -a cycle
         # Sabrent HB-BU10 (Realtek 0bda) on MINISFORUM is confirmed uhubctl-compatible.
         tag = serial[:8]
-        if platform.system() != PLATFORM_WINDOWS:
+        recovery = usb_recovery.get_backend()
+        if not recovery.is_supported():
             app_logger.log(
-                f"[manager] USB reset skipped for {tag} — only supported on Windows",
-                "WARNING")
+                f"[manager] USB reset skipped for {tag} — "
+                f"{usb_recovery.UNSUPPORTED_MESSAGE}", "WARNING")
             return False
 
         cfg = self._get_devices().get(serial)
@@ -420,12 +419,12 @@ class DeviceManager:
                 f"[manager] USB reset skipped for {tag} — no PnP Instance ID configured "
                 f"(Device Settings → Detect)", "WARNING")
             return False
-        if not usb_pnp.is_valid_instance_id(instance_id):
+        if not recovery.is_valid_instance_id(instance_id):
             app_logger.log(
                 f"[manager] USB reset skipped for {tag} — configured PnP Instance ID "
                 f"has an invalid format: {instance_id!r}", "WARNING")
             return False
-        if not usb_pnp.is_elevated():
+        if not recovery.is_elevated():
             app_logger.log(
                 f"[manager] USB reset skipped for {tag} — the app is not running as "
                 f"administrator (declined UAC or --no-elevate)", "WARNING")
@@ -435,7 +434,7 @@ class DeviceManager:
             f"[manager] Attempting USB port reset for {tag} ({instance_id}) — "
             f"Disable/Enable-PnpDevice", "WARNING")
         self._last_usb_reset_at[serial] = time.monotonic()
-        result = usb_pnp.power_cycle_device(instance_id)
+        result = recovery.power_cycle(instance_id)
         if not result.ok:
             app_logger.log(
                 f"[manager] USB reset failed for {tag}: {result.message}", "ERROR")
@@ -477,9 +476,9 @@ class DeviceManager:
 
         Skips (returns False) when the device's worker is not running (it was stopped
         meanwhile — never power-cycle a phone the user just stopped), the per-device
-        pnp_instance_id is blank, the app is not elevated, the platform is not
-        Windows, or this device was already reset within USB_RESET_MIN_INTERVAL_S (stops a flapping phone being power-cycled
-        in a loop).
+        pnp_instance_id is blank, the app is not elevated, this platform has no USB reset
+        backend (see tools/usb_recovery.py), or this device was already reset within
+        USB_RESET_MIN_INTERVAL_S (stops a flapping phone being power-cycled in a loop).
 
         Returns:
             True  — the device is back on ADB and capture was rebuilt; the worker
