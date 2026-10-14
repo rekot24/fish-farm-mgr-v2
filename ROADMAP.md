@@ -22,10 +22,31 @@ Joshua: in daily use with no reboot needed). Server track starts now: S1 is in p
    JSON endpoint (FastAPI skeleton), deploy/rollback steps from the project instructions.
 2. [ ] **S3 — Linux USB recovery.** sysfs unbind/rebind and `uhubctl` per-port power cycling behind the same
    interface as Windows. Needs on-device confirmation that uhubctl works on the Sabrent HB-BU10 hub.
-3. [ ] **S4 — Web portal, GUI parity.** Main tab (device cards and controls), Device tab, Settings, and
-   capture/detector management including the crop tool. Admin access over Tailscale. Nothing the GUI lacks.
-4. [ ] **S5 — Guest access.** Cloudflare Tunnel + Access. Guest sees only assigned device(s): Start/Stop and
+3. [ ] **G1 — Card reorder (Windows GUI).** Rearrange the device cards on the Main tab and keep the order.
+   Small and independent of the server track; Joshua's call when to slot it in, but it must land before S4 so the
+   portal inherits it. Details under "Planned: G1" below.
+4. [ ] **S4 — Web portal, GUI parity.** Main tab (device cards and controls, including card reorder from G1), Device
+   tab, Settings, and capture/detector management including the crop tool. Admin access over Tailscale. Nothing
+   the GUI lacks.
+5. [ ] **S5 — Guest access.** Cloudflare Tunnel + Access. Guest sees only assigned device(s): Start/Stop and
    End Run. Per-device authorization server-side, audit log, one-step revoke. Admin always wins.
+
+**Planned: G1 — Card reorder** (added 2026-10-06; hypotheses to verify against the code before building)
+- Why: Joshua wants to arrange the Main tab cards himself (for example his main account first) instead of whatever
+  order `devices.json` happens to have.
+- Today: cards are placed in the order of `MainTab._cards` (insertion order, which follows `devices.json`) into the
+  grid in `ui/main_tab.py` (~lines 254–267, using `ui_card_columns`). No order is stored anywhere.
+- Persist the order per machine through the existing store (atomic `save_devices()` or the settings store). A device
+  with no stored position goes at the end, so existing installs and newly added devices behave as they do today.
+- Controls: start with simple move earlier / move later buttons, shown in a "Reorder" mode so normal use is not
+  cluttered. Drag-and-drop is optional later: fiddly in Tkinter with the scrolling card area, and unreliable on phones
+  in a browser.
+- Rules: the UI never writes to workers (UI to store to workers read); reordering must not start, stop or restart a
+  device.
+- Per machine: the Windows PC and homelab each keep their own order, like all other config (never synced through git).
+- Web portal (S4): same stored order and same controls, built as part of GUI parity. Guests (S5) see only their
+  assigned devices and never see reorder controls.
+- Related: Phase 9-B (card columns/rows) edits the same grid code; do them in adjacent sessions.
 
 **Not now** (parked so they stop competing for attention)
 - 2026-10-06 Live video of a device in the browser (reuse the scrcpy stream) — nice to have; the app runs well
@@ -44,6 +65,8 @@ Joshua: in daily use with no reboot needed). Server track starts now: S1 is in p
   never published through the tunnel.
 - 2026-10-06 One backend, thin views: the headless service owns the workers; portal, `/status` and any push
   notifications are views over it.
+- 2026-10-06 New user-facing features go into the Windows GUI first; the web portal inherits them as part of GUI
+  parity (S4). Example: card reorder (G1).
 
 **Log**
 - 2026-10-06 Soak test passed. Planned S1–S5 in chat. Stay-awake problem traced to the capture-reconnect wait
@@ -927,6 +950,15 @@ the fact (commits are on `main`).
 ---
 
 ## Pending fixes
+
+- [ ] **End-run countdown shows even when End run is unchecked** (found 2026-10-06 on the new 24rolla Pixel 9 card,
+      whose account does not do end-run cycles). Display only: the action does not fire. `_handle_in_tank` gates the
+      tap on `cfg.end_run_enabled`, and the logs show zero end-run taps for a device with it off. But `get_status()`
+      (`bot/device_worker.py`) always computes `end_run_countdown_s`, and the IN_TANK / AUTO_FARM_OFF branch in
+      `ui/main_tab.py` (~line 452) always prints it. Stay awake already shows "—" when disabled. Fix: do the same for
+      End run (read `end_run_enabled` like `sa_enabled`; show "—" in the muted colour). One file, about 5 lines.
+      Behaviour to keep and document: the Force End Run button, and the stuck-in-lobby guard (`_handle_lobby`), can
+      still fire an end-run tap while the End run box is unchecked. The guard's job is to get out of a stuck lobby.
 
 - [ ] DeviceCard pending state stuck on failed start — if worker fails to start (e.g.
       scrcpy backend error), "Starting…" label never clears because running never becomes
